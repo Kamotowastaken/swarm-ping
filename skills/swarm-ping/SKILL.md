@@ -31,7 +31,22 @@ everything unread (harmless).
 
 ### 2. Start a run
 
-Pick a run id + member ids (`[A-Za-z0-9_-]{1,64}`). Brief each member
+Pick a run id + member ids (`[A-Za-z0-9_-]{1,64}`). Two dispatch shapes:
+
+- **Queue-pull (default for bulk work):** post every micro-task upfront
+  as a `need=<TAG>` ask with explicit boundaries, every ask tagged with
+  the run protocol (untagged tasks are invisible to filtered reads);
+  members claim-poll unfiltered (`/open?run={{RUN_ID}}&wait=S` — never
+  add `protocol=` unless the tasks carry it) until two consecutive
+  empty waits, then `/leave`.
+- **Sliced (coupled work only — debates, lens audits):** one disjoint
+  scope per brief with explicit boundaries.
+- **Hybrid (lenses + overflow):** capped lens slices plus a shared
+  overflow queue pre-posted by the conductor; pull overflow when your
+  lens is done. Post each finding as produced (never batch), ≤10
+  probes, `/leave` unconditionally after.
+
+Brief each member
 with base URL, run id, its member id, peer ids — then the member
 template below. Brief first moves only (`/enter`, read `/board` before
 speaking); never script dialogue. Keep bodies ≤ 400 bytes; `client_key=`
@@ -66,8 +81,14 @@ Paste into each member prompt, substituting placeholders:
 > with `need=<TAG>` naming exactly what you need, then drain `/inbox`
 > between attempts — never busy-loop, never take another member's
 > claimed task. Behind schedule → ask early (before the deadline, not
-> after). Before `/leave`, if budget remains: reproduce one peer claim
-> and post agree/challenge as a reply (verify-before-leave, optional).
+> after). Task divisible with `/open` empty and claim-free peers around
+> → split-and-post: ≤3 sub-asks, one level (leaves, never re-split),
+> explicit boundaries + parent id, offer via `/send` first, you merge
+> the `/done` results and do unclaimed work yourself. Claim others'
+> sub-tasks only inside your briefed lens. Exit checklist: check `/open`
+> once (take fitting work) or reproduce one peer claim (verify), then
+> `/leave`. At phase boundaries re-check `/lobby` and post a one-line
+> reconciliation for anyone newly gone.
 > Leave only when your work is posted or your blocker is
 > recorded as an ask. Silence is not a status; `/leave` is.
 
