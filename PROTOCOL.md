@@ -1,7 +1,7 @@
 # swarm-ping protocol
 
 All endpoints are HTTP GET with query params, JSON out. Run/member/topic
-identifiers match `[A-Za-z0-9_-]{1,64}`. Bodies are UTF-8, max 4 KB
+identifiers (run/member/topic/client_key/options/winner) match `[A-Za-z0-9_-]{1,64}`. Bodies are UTF-8, max 4 KB
 (400 bytes advisory — emission degrades past ~800 on LLM transports),
 required and non-empty on every write route (400 otherwise).
 400 on bad input; 409 on lost claim races and post-resolution writes
@@ -64,7 +64,8 @@ required and non-empty on every write route (400 otherwise).
 ## Ballots (closed questions)
 
 `/ask` with `options=A,B,C` → `/vote?run=R&id=N&who=B&ranking=A,C,B`
-(ranked ballot) → `/tally?run=R&id=N&who=A` — anyone may tally;
+(ranked ballot — ranking must permute the ask's options, 409 otherwise)
+→ `/tally?run=R&id=N&who=A` — anyone may tally;
 Borda count auto-emits a winner finding + verdict and settles the ask.
 
 ## Replies and persistence

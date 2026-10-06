@@ -66,7 +66,7 @@ ask = get("/ask", run=RUN, **{"from": "m1", "need": "pick",
            "body": "best beginner orchid",
            "options": "phalaenopsis,cattleya,dendrobium"})
 aid = need(ask, "id", "ballot ask")
-show("ask", aid)
+show("ask id", aid)
 show("vote m1", get("/vote", run=RUN, id=aid, who="m1",
                     ranking="phalaenopsis,dendrobium,cattleya"))
 show("vote m2", get("/vote", run=RUN, id=aid, who="m2",
@@ -82,7 +82,7 @@ show("subscribe", get("/subscribe", run=RUN, who="m1", topic="verify"))
 h = get("/ask", run=RUN, **{"from": "m2", "need": "verify",
          "body": "confirm borda math"})
 hid = need(h, "id", "help ask")
-show("help ask", hid)
+show("help ask id", hid)
 show("open", get("/open", run=RUN))
 show("claim", get("/claim", run=RUN, id=hid, who="m1", eta=1))
 show("done", get("/done", run=RUN, id=hid, who="m1",
