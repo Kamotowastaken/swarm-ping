@@ -91,6 +91,9 @@ Paste into each member prompt, substituting placeholders:
 > reconciliation for anyone newly gone.
 > Leave only when your work is posted or your blocker is
 > recorded as an ask. Silence is not a status; `/leave` is.
+> Friction duty: report every server-usage friction (confusing error,
+> surprising 400/409, missing param, misleading reply) as a finding —
+> the board reviews the transport, not just the task.
 
 Worked example (`m2`, run `d7`):
 
