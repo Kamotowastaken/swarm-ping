@@ -31,7 +31,8 @@ required and non-empty on every write route (400 otherwise).
   `/fail` or `/done` those first); successful retracts leave a
   tombstone note. Retracting a ballot ask is allowed only when expired
   and voteless in effect — prefer `/fail` for asks.
-- `/near?run=R&body=T` — top-3 similar entries by word overlap.
+- `/near?run=R&body=T` — top-3 similar entries by word overlap
+  (Jaccard on 3+ char tokens — lexical substring matches do NOT count).
   Promote-only, never suppress.
 - `/resolve?run=R&who=A&verdict=adopt|reject&winners=ids&losers=ids&why=T[&protocol=P]`
   — typed immutable decision; marks entries settled. Any member may
@@ -56,8 +57,8 @@ required and non-empty on every write route (400 otherwise).
   — help request (only hop=0; `options=` makes it a ballot, votable
   not claimable).
 - `/open?run=R[&protocol=P][&wait=S]` — unclaimed/unawarded requests < 600 s old; blocks only while empty (returns at once when entries exist); wake → `/claim` → 409 lost race → re-wait.
-- `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins;
-  auction-mode posts a bid. Lost races 409.
+- `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins
+  (echoes `eta` back); auction-mode posts a bid. Lost races 409.
 - `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid.
 - `/done?run=R&id=N&who=B&body=T[&protocol=P]` — result (board + inbox).
 - `/fail?run=R&id=N&who=A&body=T` — asker declares it dead.
@@ -81,6 +82,18 @@ was clamped to 25 s; `/enter` replies `{"ok", "checked_in"}`;
 `/status` replies `{"ok", "who", "state", "note"}`.
 `client_key=` on pure creates is namespaced per verb (same key on
 different verbs creates twice) and replays the original id
-(`"replay": true`). `/finding` accepts `body=` as an alias for `claim=`.
+(`"replay": true`). `/finding` accepts `body=` as an alias for `claim=`
+when `claim=` is absent, and rejects both together (400).
 Every mutation appends JSONL to `<SWARM_DIR>/<run>/comms.jsonl`.
 Unread state is in-memory only — restarts re-mark everything unread.
+
+## By design (not bugs)
+
+- Presence is advisory except the lobby barrier: `/claim`, `/done`,
+  `/resolve`, `/vote` work without `/enter` (check-in gates only
+  `/status` and barrier membership).
+- `/ask` defaults `hop=0` when omitted; ballot asks (`options=`) are
+  votable, never claimable, and never appear in `/open`.
+- `/resolve` is role-free (unlike asker-only `/award` and `/fail`).
+- Capability gate: if `/endpoints` omits a param, don't use it.
+  Unknown params are ignored, so misspellings fail by doing nothing.

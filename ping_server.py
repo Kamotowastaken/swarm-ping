@@ -480,6 +480,9 @@ class Store:
                      "from": who, "protocol": a.get("protocol", "general"),
                      "body": f"FAILED {nid} ({a['need']}): {body}"}
             self.board.setdefault(run, []).append(entry)
+            for e in self.board.get(run, []):
+                if e["id"] == nid:
+                    e["settled"] = True  # dead asks refuse later writes
             del self.asks[(run, nid)]
             self._log(run, {"kind": "failure", "run": run, **entry})
             return {"ok": True, "id": entry["id"]}
@@ -636,6 +639,9 @@ class Store:
                      "from": who, "protocol": protocol,
                      "body": f"RESOLVED {nid} for {a['from']}: {body}"}
             self.board.setdefault(run, []).append(entry)
+            for e in self.board.get(run, []):
+                if e["id"] == nid:
+                    e["settled"] = True  # resolved asks refuse later writes
             del self.asks[(run, nid)]
             self._log(run, {"kind": "resolution", "run": run, **entry})
             # auto-notify the requester (directly via store: already locked)
@@ -1013,19 +1019,22 @@ class Handler(BaseHTTPRequestHandler):
             if "protocol" not in qs:
                 protocol = None
             try:
-                wait = min(max(int(self._one(qs, "wait", "0")), 0),
-                           WAIT_MAX)
+                asked = int(self._one(qs, "wait", "0"))
             except ValueError:
                 return self._bad(f"bad wait (want 0-{WAIT_MAX} seconds)")
+            wait = min(max(asked, 0), WAIT_MAX)
             first = STORE.open_asks(run, protocol)
             deadline = time.time() + wait
             cur = first
+            clamped_o = asked != wait
             while not cur and time.time() < deadline:
                 time.sleep(0.25)
                 cur = STORE.open_asks(run, protocol)
             out = {"open": cur,
                    "waited": round(wait - max(deadline - time.time(), 0),
                                    1)}
+            if clamped_o:
+                out["clamped"] = True
             return self._send_json(200, out)
         if path == "/claim":
             who = self._one(qs, "who", "")
@@ -1044,6 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad who (your member id)")
             res = STORE.claim(run, nid, who, eta, note)
             if res["ok"]:
+                res["eta"] = eta  # echo the accepted estimate back
                 return self._send_json(200, res)
             if res.get("error", "").startswith("ballot ask"):
                 return self._bad(res["error"])
@@ -1159,6 +1169,9 @@ class Handler(BaseHTTPRequestHandler):
                 # tolerant reader: body= aliases claim= (unknown params
                 # are otherwise ignored, which used to drop prose silently)
                 claim = self._one(qs, "body", "")
+            elif self._one(qs, "body", ""):
+                return self._bad("bad body (claim= already present — "
+                                 "send one, not both)")
             if not claim:
                 return self._bad("bad claim (required, keep it one line)")
             if etype not in ("observed", "asserted"):
