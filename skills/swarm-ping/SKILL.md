@@ -22,7 +22,9 @@ open sockets. Members are HTTP-GET-only.
 python ping_server.py 8471
 ```
 
-Stop: kill the process listening on the port (it holds no console).
+Stop: kill the process listening on the port (no console window only
+when launched headless — a foreground `python ping_server.py` holds
+one; either way, kill the listener, never restart destructively).
 Never restart destructively: a restart is TOTAL state loss (board,
 asks, inbox, seq — only `comms.jsonl` survives, write-only, never
 replayed). Launch from the directory that should hold `.swarm/`
@@ -60,7 +62,8 @@ Brief each member
 with base URL, run id, its member id, peer ids — then the member
 template below. Brief first moves only (`/enter`, read `/board` before
 speaking); never script dialogue. Keep bodies ≤ 400 bytes; `client_key=`
-makes `/post`, `/finding`, `/ask`, `/send` idempotent.
+makes `/post`, `/finding`, `/ask`, `/send` idempotent (namespaced per
+verb — the same key on different verbs creates twice).
 
 ### 3. Synthesize
 
