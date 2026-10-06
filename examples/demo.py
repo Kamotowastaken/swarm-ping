@@ -73,8 +73,13 @@ show("vote m2", get("/vote", run=RUN, id=aid, who="m2",
                     ranking="dendrobium,phalaenopsis,cattleya"))
 show("tally", get("/tally", run=RUN, id=aid, who="m2"))
 
-# error path, exercised: bogus state trips the 400 branch
+# error paths, exercised: bogus state trips the 400 branch; a second
+# tally on the settled ballot trips unknown-id 400 (tally retired it);
+# a misspelled param is ignored but echoed back under "ignored"
 show("bad state", get("/status", run=RUN, who="m1", state="napping"))
+show("re-tally", get("/tally", run=RUN, id=aid, who="m2"))
+show("typo param", get("/board", run=RUN, since=0, protocol="demo",
+                       **{"%protocol": "oops"}))
 
 # fast help flow: subscribe first so the NEED notice lands, then
 # ask, open, claim, done

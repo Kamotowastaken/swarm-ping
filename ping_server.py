@@ -17,12 +17,12 @@ Endpoints (all GET, JSON out):
   Pure creates (/post /finding /ask /send) accept &client_key=K for idempotent replay: repeats return the original id with "replay": true.
   /resolve?run=R&who=A&verdict=adopt|reject&winners=ids&losers=ids&why=T[&protocol=P]  typed immutable decision; marks entries settled
   /near?run=R&body=T  top-3 similar board entries by word overlap (promote, never suppress)
-  Ballots: /ask gains options=A,B,C for closed questions; /vote?run=R&id=N&who=B&ranking=A,C,B casts a ranked ballot; /tally?run=R&id=N&who=A auto-emits winner finding + verdict (Borda)
+  Ballots: /ask gains options=A,B,C for closed questions; /vote?run=R&id=N&who=B&ranking=A,C,B casts a ranked ballot (last-write-wins per member, by design — no per-voter history); /tally?run=R&id=N&who=A auto-emits winner finding + verdict (Borda, no quorum floor by design — 1 ballot settles)
   /board?run=R&since=N[&wait=S][&protocol=P][&kind=K]  entries id>N; long-poll up to S sec (max 25)
-  /retract?run=R&id=N&who=B      delete B's own board entry N (children keep a dangling reply_to — readers must tolerate unresolvable ids)
+  /retract?run=R&id=N&who=B[&protocol=P]  delete B's own board entry N (tombstone carries protocol; children keep a dangling reply_to — readers must tolerate unresolvable ids)
   Lobby (barrier + help flow + presence):
   /enter?run=R&who=B             check into the lobby (re-entry clears a leave)
-  /leave?run=R&who=B[&note=T]    clock out: drops from active, releases live claims held, announces on board
+  /leave?run=R&who=B[&note=T][&protocol=P]  clock out: drops from active, releases live claims held, announces on board (note carries protocol)
   /status?run=R&who=B&state=working|idle[&note=T]  advisory only — never affects matching/gating, but check-in is required
   /lobby?run=R[&wait=S]             -> {"checked_in": [...], "n": k, "open": j, "left": [...], "status": {who: "state[: note]"}, "waited": s} (long-polls until presence/open changes)
   Help flow (modes: fast = first-claim wins; auction = bids then /award):
@@ -36,12 +36,12 @@ Endpoints (all GET, JSON out):
   /unsubscribe?run=R&who=B&topic=TAG
   /transcript?run=R                 markdown render of the run's board
 
-Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total). /board replies carry "waited" seconds.
+  Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total; /tally returns {ok,winner,ranked,scores,finding,verdict} instead). /board replies carry "waited" seconds.
 
-Rules: run/who/from/to/need/topic/protocol/client_key/options/winner match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 otherwise (409 on lost claim races and post-resolution writes, settled re-resolve included).
-Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
-(env SWARM_DIR, default <cwd>/.swarm). Unread state is in-memory only — a
-server restart marks everything unread again (members re-drain; harmless).
+Rules: run/who/from/to/need/topic/protocol/client_key/options/winner match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 on bad input; 409 only on lost races (live-claim/award conflicts) and post-resolution writes. Unknown params are ignored but echoed back under "ignored" on 200 replies — a misspelled param fails by doing nothing, loudly.
+Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/tally/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
+(env SWARM_DIR, default <cwd>/.swarm — resolved once at import, so always launch from the same cwd). Unread state is in-memory only — a
+server restart marks everything unread again (members re-drain; harmless). Restart is total state loss (board/inbox/asks/seq are memory-only; comms.jsonl is write-only, never replayed) — never auto-restart destructively.
 
 Security: binds 127.0.0.1 only, no auth. Never expose beyond localhost.
 Stdlib only. Usage: ping_server.py [port]  (default 8471)
@@ -55,7 +55,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NAME = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 BODY_MAX = 4096
 BRIEF_BODY_MAX = 400  # brief discipline: longer bodies risk transit clipping
 HEAD_LEN = 120
@@ -65,6 +65,42 @@ SWARM_DIR = os.environ.get(
     "SWARM_DIR",
     os.path.join(os.getcwd(), ".swarm"),
 )
+
+# Known query params per route (mirrors /endpoints; unknown params are
+# ignored server-side, so 200 replies echo them back under "ignored" —
+# a misspelled param fails by doing nothing, and now says so).
+ALLOWED = {
+    "/health": set(), "/metrics": set(), "/endpoints": set(),
+    "/send": {"run", "from", "to", "body", "client_key"},
+    "/inbox": {"run", "who"}, "/peek": {"run", "who"},
+    "/post": {"run", "from", "body", "in_reply_to", "protocol",
+              "client_key"},
+    "/append": {"run", "id", "who", "body"},
+    "/finding": {"run", "from", "claim", "body", "evidence", "quote",
+                 "etype", "scope", "confidence", "protocol",
+                 "client_key"},
+    "/resolve": {"run", "who", "verdict", "winners", "losers", "why",
+                 "protocol"},
+    "/near": {"run", "body"},
+    "/vote": {"run", "id", "who", "ranking"},
+    "/tally": {"run", "id", "who"},
+    "/board": {"run", "since", "wait", "protocol", "kind"},
+    "/retract": {"run", "id", "who", "protocol"},
+    "/enter": {"run", "who"},
+    "/leave": {"run", "who", "note", "protocol"},
+    "/status": {"run", "who", "state", "note"},
+    "/lobby": {"run", "wait"},
+    "/ask": {"run", "from", "need", "body", "hop", "mode", "options",
+             "protocol", "client_key"},
+    "/open": {"run", "protocol", "wait"},
+    "/claim": {"run", "id", "who", "eta", "note"},
+    "/award": {"run", "id", "who", "winner"},
+    "/done": {"run", "id", "who", "body", "protocol"},
+    "/fail": {"run", "id", "who", "body"},
+    "/subscribe": {"run", "who", "topic"},
+    "/unsubscribe": {"run", "who", "topic"},
+    "/transcript": {"run"},
+}
 
 
 class Store:
@@ -194,9 +230,9 @@ class Store:
                      "confidence": confidence, "body": body}
             self.board.setdefault(run, []).append(entry)
             self._log(run, {"kind": "finding", "run": run, **entry})
-            return nid
+            return {"id": nid, "body": body}
 
-    def retract(self, run, nid, who):
+    def retract(self, run, nid, who, protocol="general"):
         with self.lock:
             entries = self.board.get(run, [])
             for i, e in enumerate(entries):
@@ -221,7 +257,7 @@ class Store:
                     self.seq += 1
                     tomb = {"id": self.seq, "kind": "note",
                             "ts": time.time(), "from": who,
-                            "protocol": "general",
+                            "protocol": protocol,
                             "body": f"retracted entry {nid}"}
                     self.board.setdefault(run, []).append(tomb)
                     self._log(run, {"kind": "note", "run": run, **tomb})
@@ -236,7 +272,7 @@ class Store:
             self.departed.get(run, {}).pop(who, None)  # re-entry clears it
             return sorted(self.present[run])
 
-    def leave(self, run, who, note=""):
+    def leave(self, run, who, note="", protocol="general"):
         # Terminated: drop from active, release live claims held, announce
         # on the board (wakes long-pollers) + JSONL. Never 404s: leaving a
         # run you never entered is a no-op success (idempotent clock-out).
@@ -257,12 +293,13 @@ class Store:
                         a["awarded"] = None  # auction reopens to bidders
                     released.append(nid)
                     self._log(run, {"kind": "release", "run": run,
-                                    "id": nid, "from": who})
+                                    "id": nid, "from": who,
+                                    "protocol": protocol})
             self.departed.setdefault(run, {})[who] = {"ts": now,
                                                       "note": note}
             self.seq += 1
             entry = {"id": self.seq, "kind": "note", "ts": now,
-                     "from": who, "protocol": "general",
+                     "from": who, "protocol": protocol,
                      "body": f"\u23fb {who} clocked out" +
                              (f": {note}" if note else "") +
                              (f" (released claims {released})"
@@ -521,9 +558,17 @@ class Store:
                 if hit is not None:
                     return {"id": hit, "replay": True}
             nid = thunk()
+            if isinstance(nid, dict):
+                # finding composes id+body; the key stores the id only
+                out = {"id": nid.get("id")}
+                if nid.get("body"):
+                    out["body"] = nid["body"]
+                nid = out["id"]
+            else:
+                out = {"id": nid}
             if key and nid is not None:
                 self.keys[(run, frm, verb, key)] = nid
-            return {"id": nid}
+            return out
 
     def resolve(self, run, who, verdict, winners, losers, why, protocol):
         with self.lock:
@@ -556,8 +601,12 @@ class Store:
             for e in board:
                 if e["id"] in winners + losers:
                     e["settled"] = True
+            # retire settled asks: a verdict-closed ask leaves /open,
+            # /metrics and claim reach (double-settle via tally/done)
+            retired = [i for i in winners + losers
+                       if self.asks.pop((run, i), None) is not None]
             self._log(run, {"kind": "verdict", "run": run, **entry})
-            return {"ok": True, "id": nid}
+            return {"ok": True, "id": nid, "retired": retired}
 
     @staticmethod
     def _words(text):
@@ -655,6 +704,9 @@ class Store:
             if a["mode"] == "auction" and not a["awarded"]:
                 return {"ok": False, "error": "awaiting /award — bids only"}
             if a["claimed_by"] != who:
+                if a["claimed_by"] is None:
+                    return {"ok": False,
+                            "error": "ask unclaimed — /claim it first"}
                 return {"ok": False,
                         "error": f"claimed by {a['claimed_by']}"}
             self.seq += 1
@@ -696,6 +748,10 @@ class Handler(BaseHTTPRequestHandler):
         return v
 
     def _send_json(self, code, obj):
+        if code == 200 and isinstance(obj, dict) and \
+                getattr(self, "_ignored_params", None) and \
+                "ignored" not in obj and "error" not in obj:
+            obj = {**obj, "ignored": self._ignored_params}
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -732,6 +788,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         qs = self._qs()
+        self._ignored_params = sorted(set(qs) - ALLOWED.get(path, set()))
         if path == "/health":
             return self._send_json(200, {"ok": True})
         if path == "/metrics":
@@ -752,9 +809,9 @@ class Handler(BaseHTTPRequestHandler):
                 "/vote?run=R&id=N&who=B&ranking=A,C,B",
                 "/tally?run=R&id=N&who=A",
                 "/board?run=R&since=N[&wait=S][&protocol=P][&kind=K]",
-                "/retract?run=R&id=N&who=B",
+                "/retract?run=R&id=N&who=B[&protocol=P]",
                 "/enter?run=R&who=B",
-                "/leave?run=R&who=B[&note=T]",
+                "/leave?run=R&who=B[&note=T][&protocol=P]",
                 "/status?run=R&who=B&state=working|idle[&note=T]",
                 "/lobby?run=R[&wait=S]",
                 "/ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P][&client_key=K]",
@@ -800,7 +857,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/inbox", "/peek"):
             who = self._one(qs, "who", "")
             if not who or not NAME.match(who):
-                return self._bad("bad who")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             msgs = STORE.drain(run, who, peek=(path == "/peek"))
             return self._send_json(200, {"messages": msgs})
         if path == "/post":
@@ -839,10 +896,11 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._bad("bad since (want int)")
             try:
-                wait = min(max(int(self._one(qs, "wait", "0")), 0),
-                           WAIT_MAX)
+                asked = int(self._one(qs, "wait", "0"))
             except ValueError:
                 return self._bad(f"bad wait (want 0-{WAIT_MAX} seconds)")
+            wait = min(max(asked, 0), WAIT_MAX)
+            clamped = asked != wait
             protocol = self._proto(qs)
             if "protocol" in qs and protocol is None:
                 return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
@@ -862,7 +920,9 @@ class Handler(BaseHTTPRequestHandler):
                 entries = STORE.board_since(run, since, protocol, kind)
             return self._send_json(200, {"entries": entries,
                                         "waited": round(wait - max(
-                                            deadline - time.time(), 0), 1)})
+                                            deadline - time.time(), 0), 1),
+                                        **({"clamped": True}
+                                           if clamped else {})})
         if path == "/resolve":
             who = self._one(qs, "who", "")
             verdict = self._one(qs, "verdict", "")
@@ -891,6 +951,7 @@ class Handler(BaseHTTPRequestHandler):
                                 why, protocol)
             if res["ok"]:
                 out = self._echo(res["id"], why)
+                out["retired"] = res.get("retired", [])
                 return self._send_json(200, out)
             if res["error"].startswith("already settled"):
                 return self._send_json(409, res)
@@ -941,7 +1002,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
                 return self._bad("bad who (your member id — this route wants who=, not from=)")
-            res = STORE.retract(run, nid, who)
+            protocol = self._proto(qs)
+            if protocol is None:
+                return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
+            res = STORE.retract(run, nid, who, protocol)
             if res["ok"]:
                 return self._send_json(200, res)
             if res["error"].startswith("already settled") or \
@@ -983,7 +1047,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(note):
                 return self._bad("note over 4KB")
-            return self._send_json(200, STORE.leave(run, who, note))
+            protocol = self._proto(qs)
+            if protocol is None:
+                return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
+            return self._send_json(200, STORE.leave(run, who, note,
+                                                   protocol))
         if path == "/status":
             who = self._one(qs, "who", "")
             state = self._one(qs, "state", "")
@@ -1087,6 +1155,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(200, res)
             if res.get("error", "").startswith("ballot ask"):
                 return self._bad(res["error"])
+            # error-keyed failures are client validation (400); keyless
+            # claimed_by/awarded_to replies are lost races (409)
+            if "error" in res:
+                return self._bad(res["error"])
             return self._send_json(409, res)
         if path == "/award":
             who = self._one(qs, "who", "")
@@ -1102,6 +1174,10 @@ class Handler(BaseHTTPRequestHandler):
             res = STORE.award(run, nid, who, winner)
             if res["ok"]:
                 return self._send_json(200, res)
+            # error-keyed failures are client validation (400); keyless
+            # awarded_to replies are lost races (409)
+            if "error" in res:
+                return self._bad(res["error"])
             return self._send_json(409, res)
         if path == "/done":
             who = self._one(qs, "who", "")
@@ -1125,6 +1201,12 @@ class Handler(BaseHTTPRequestHandler):
                 out["request"] = nid
                 out["resolved"] = nid
                 return self._send_json(200, out)
+            # "claimed by ..." means another member holds it (409 race);
+            # every other error is client validation (400)
+            if res.get("error", "").startswith("claimed by"):
+                return self._send_json(409, res)
+            if "error" in res:
+                return self._bad(res["error"])
             return self._send_json(409, res)
         if path == "/fail":
             who = self._one(qs, "who", "")
@@ -1144,7 +1226,9 @@ class Handler(BaseHTTPRequestHandler):
                 out = self._echo(res["id"], body)
                 out["failed"] = nid
                 return self._send_json(200, out)
-            return self._send_json(409, res)
+            # fail has no race branch: unknown id / wrong asker are
+            # client validation (400)
+            return self._bad(res["error"])
         if path == "/subscribe":
             who = self._one(qs, "who", "")
             topic = self._topic(qs)
@@ -1228,7 +1312,10 @@ class Handler(BaseHTTPRequestHandler):
             nid = res["id"]
             if nid is None:
                 return self._bad("composed entry over 4KB — shorten fields")
-            return self._send_json(200, self._echo(nid, claim))
+            # echo the composed body (len/head must describe the entry,
+            # not the claim param alone)
+            return self._send_json(200, self._echo(
+                nid, res.get("body", claim)))
         if path == "/transcript":
             return self._send_json(200, {"transcript": STORE.transcript(
                 run)})

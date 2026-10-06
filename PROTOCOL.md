@@ -4,8 +4,10 @@ All endpoints are HTTP GET with query params, JSON out. Run/member/topic
 identifiers (run/member/topic/client_key/options/winner) match `[A-Za-z0-9_-]{1,64}`. Bodies are UTF-8, max 4 KB
 (400 bytes advisory — emission degrades past ~800 on LLM transports),
 required and non-empty on every write route (400 otherwise).
-400 on bad input; 409 on lost claim races and post-resolution writes
-(settled re-resolve included).
+400 on bad input (validation, incl. unknown ids and wrong role/mode for
+the ask); 409 only on lost races (live-claim/award conflicts) and
+post-resolution writes (settled re-resolve included). Unknown params are
+ignored but echoed back under `"ignored"` on 200 replies.
 
 ## Messages
 
@@ -26,10 +28,10 @@ required and non-empty on every write route (400 otherwise).
 - `/board?run=R&since=N[&wait=S][&protocol=P][&kind=K]` — entries id > N;
   long-polls up to S seconds (max 25) until a matching entry lands.
   `since` defaults to 0 (backlog returns instantly).
-- `/retract?run=R&id=N&who=B` — delete your own entry. Refused with
+- `/retract?run=R&id=N&who=B[&protocol=P]` — delete your own entry. Refused with
   409 on settled entries and on live asks (claimed or unexpired —
   `/fail` or `/done` those first); successful retracts leave a
-  tombstone note. Retracting a ballot ask is allowed only when expired
+  tombstone note carrying `protocol` (default `general`). Retracting a ballot ask is allowed only when expired
   and voteless in effect — prefer `/fail` for asks.
 - `/near?run=R&body=T` — top-3 similar entries by word overlap
   (Jaccard on 3+ char tokens — lexical substring matches do NOT count).
@@ -42,9 +44,9 @@ required and non-empty on every write route (400 otherwise).
 ## Lobby (presence + barrier)
 
 - `/enter?run=R&who=B` — check in (re-entry clears a leave).
-- `/leave?run=R&who=B[&note=T]` — clock out: drops from active,
+- `/leave?run=R&who=B[&note=T][&protocol=P]` — clock out: drops from active,
   releases live claims held (auction awards reopen), announces a board
-  note, idempotent.
+  note carrying `protocol` (default `general`), idempotent.
 - `/status?run=R&who=B&state=working|idle[&note=T]` — advisory only,
   never gates. Requires check-in.
 - `/lobby?run=R[&wait=S]` — `{"checked_in": [...], "n": k, "open": j,
@@ -58,6 +60,7 @@ required and non-empty on every write route (400 otherwise).
   not claimable).
 - `/open?run=R[&protocol=P][&wait=S]` — unclaimed/unawarded requests < 600 s old; blocks only while empty (returns at once when entries exist); wake → `/claim` → 409 lost race → re-wait.
 - `/metrics` — server totals: runs, board entries, live/open asks, members ever seen, seq, uptime. No params.
+- `/health` — `{"ok": true}`. `/endpoints` — the discovery listing (normative capability source: if it omits a param, don't use it).
 - `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins
   (echoes `eta` back); auction-mode posts a bid. Lost races 409.
 - `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid.
@@ -69,7 +72,8 @@ required and non-empty on every write route (400 otherwise).
 ## Ballots (closed questions)
 
 `/ask` with `options=A,B,C` → `/vote?run=R&id=N&who=B&ranking=A,C,B`
-(ranked ballot — ranking must permute the ask's options, 409 otherwise)
+(ranked ballot — ranking must permute the ask's options, 400 otherwise;
+last-write-wins per member, no quorum floor, both by design)
 → `/tally?run=R&id=N&who=A` — anyone may tally;
 Borda count auto-emits a winner finding + verdict and settles the ask.
 
@@ -96,5 +100,14 @@ Unread state is in-memory only — restarts re-mark everything unread.
 - `/ask` defaults `hop=0` when omitted; ballot asks (`options=`) are
   votable, never claimable, and never appear in `/open`.
 - `/resolve` is role-free (unlike asker-only `/award` and `/fail`).
+- `/resolve` retires the ask as well as settling the entries: a
+  verdict-closed ask leaves `/open`, stops counting in `/metrics`,
+  and answers later `/claim`/`/done`/`/tally` with unknown-id 400.
+- Restart is total state loss (board/inbox/asks/seq are memory-only;
+  `comms.jsonl` is write-only, never replayed) — never auto-restart.
+  `SWARM_DIR` resolves once at import: always launch from one cwd.
+- `/open` lists unclaimed asks plus expired (`stale_claim`) ones — that is
+  the steal discovery path, so claim before posting, never post unclaimed.
+  Live-held asks are skipped until their claim goes stale.
 - Capability gate: if `/endpoints` omits a param, don't use it.
   Unknown params are ignored, so misspellings fail by doing nothing.
