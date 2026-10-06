@@ -35,7 +35,7 @@ Endpoints (all GET, JSON out):
   /unsubscribe?run=R&who=B&topic=TAG
   /transcript?run=R                 markdown render of the run's board
 
-Replies to send/post/ask/done/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total). /board replies carry "waited" seconds.
+Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total). /board replies carry "waited" seconds.
 
 Rules: run/who/from/to/need/topic/protocol match [A-Za-z0-9_-]{1,64}; body <= 4KB. 400 otherwise (409 on lost claim races and post-resolution writes).
 Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
@@ -141,8 +141,10 @@ class Store:
             return entry["id"]
 
     def board_since(self, run, since, protocol=None, kind=None):
+        # Snapshot copies: callers encode after the lock drops, while
+        # resolve()/retract() may still mutate live entries.
         with self.lock:
-            return [e for e in self.board.get(run, [])
+            return [dict(e) for e in self.board.get(run, [])
                     if e["id"] > since
                     and (not protocol or
                          e.get("protocol", "general") == protocol)
@@ -293,7 +295,8 @@ class Store:
 
     def transcript(self, run):
         with self.lock:
-            entries = list(self.board.get(run, []))
+            # Snapshot copies (see board_since): rendering runs lock-free.
+            entries = [dict(e) for e in self.board.get(run, [])]
         lines = [f"# transcript {run} ({len(entries)} entries)"]
         for e in entries:
             head = f"## {e['id']} [{e.get('kind', 'note')}] {e['from']}"
@@ -454,19 +457,8 @@ class Store:
             self._log(run, {"kind": "failure", "run": run, **entry})
             return {"ok": True, "id": entry["id"]}
 
-    def replay(self, run, frm, key):
-        # idempotent creates: same (run, member, key) returns the original.
-        # Keys are per-member: two members may reuse the same key safely.
-        with self.lock:
-            return self.keys.get((run, frm, key))
-
-    def remember(self, run, frm, key, nid):
-        with self.lock:
-            self.keys[(run, frm, key)] = nid
-
     def create_once(self, run, frm, key, thunk):
-        # atomic check-and-create: closes the TOCTOU between replay() and
-        # remember() under one RLock hold.
+        # atomic check-and-create under one RLock hold.
         with self.lock:
             if key:
                 hit = self.keys.get((run, frm, key))
@@ -582,7 +574,8 @@ class Store:
             vid = self.seq
             ventry = {"id": vid, "kind": "verdict", "ts": time.time(),
                       "from": who, "protocol": a.get("protocol", "general"),
-                      "verdict": "adopt", "winners": [], "losers": ranked[1:],
+                      "verdict": "adopt", "winners": [winner],
+                      "losers": ranked[1:],
                       "body": f"VERDICT adopt (ballot): {winner} wins, "
                               f"losers={ranked[1:]}"}
             self.board.setdefault(run, []).append(ventry)
@@ -752,6 +745,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad from (your member id, e.g. from=m1)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             try:
                 reply_to = int(self._one(qs, "in_reply_to", "0"))
             except ValueError:
@@ -895,10 +890,8 @@ class Handler(BaseHTTPRequestHandler):
             while time.time() < deadline:
                 time.sleep(0.25)
                 cur = STORE.lobby(run)
-                if json.dumps(cur, sort_keys=True) != json.dumps(
-                        first, sort_keys=True):
+                if cur != first:  # lobby() returns value-fresh dicts
                     break
-                cur = first
             out = dict(cur)
             out["waited"] = round(wait - max(deadline - time.time(), 0),
                                   1)
