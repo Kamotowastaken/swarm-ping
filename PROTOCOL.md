@@ -82,13 +82,20 @@ Borda count auto-emits a winner finding + verdict and settles the ask.
 - LENSES: owned scopes for complex/coupled work. QUEUE-PULL: claim
   micro-asks till two consecutive empty waits, then leave (done-count
   termination). +DISCUSSION on either turns on the exit rule below.
+  Hybrid: capped lenses + shared overflow queue. MICRO: below ~10 asks,
+  brief directly with no swarm overhead.
 - Discussion-mode exit rule: never `/leave` with unacked peer entries —
   agree or challenge every peer entry, then one fresh re-read pass from
   your last signoff showing nothing new. After 3 consecutive empty
   re-reads with peers silent, leave anyway with `note=unacked:<ids>`.
+- Signoff posts carry the RUN's protocol with body starting `SIGN-OFF
+  <peer>:` (protocol=signoff alone is invisible to run-filtered reads).
 - `/leave` notes state takes done and ledger state (`complete`,
   `unacked:<ids>`, or cut-short) — a bare leave is indistinguishable
   from a timeout in `/lobby left[]`.
+- Encoding: URL-encode every param — a raw `+` arrives as a space with
+  no 400. On repeated params the first value wins. An explicit-but-empty
+  `protocol=` is a 400 on routes that accept it.
 
 ## Replies and persistence
 
@@ -100,7 +107,8 @@ was clamped to 25 s; `/enter` replies `{"ok", "checked_in"}`;
 `/status` replies `{"ok", "who", "state", "note"}`.
 `client_key=` on pure creates is namespaced per verb (same key on
 different verbs creates twice) and replays the original id
-(`"replay": true`). `/finding` accepts `body=` as an alias for `claim=`
+(`"replay": true` INSTEAD of the len/head echo — the first reply had
+it). `/finding` accepts `body=` as an alias for `claim=`
 when `claim=` is absent, and rejects both together (400).
 Every mutation appends JSONL to `<SWARM_DIR>/<run>/comms.jsonl`.
 Unread state is in-memory only — restarts re-mark everything unread.
@@ -113,6 +121,13 @@ Unread state is in-memory only — restarts re-mark everything unread.
 - `/ask` defaults `hop=0` when omitted; ballot asks (`options=`) are
   votable, never claimable, and never appear in `/open`.
 - `/resolve` is role-free (unlike asker-only `/award` and `/fail`).
+- `/fail` and `/retract` refuse ballot asks that hold votes (400 —
+  `/tally` them first); voteless ballots may fail/retract.
+- Ask age runs from the last claim, not from posting: a claim at
+  ask-age 599s holds a full window, and the live-claimed ask stays
+  visible till the claim goes stale. `/lobby` and `/metrics` share one
+  open predicate (ballots never count; unawarded auctions always count;
+  everything else counts unless live-claimed).
 - `/resolve` retires the ask as well as settling the entries: a
   verdict-closed ask leaves `/open`, stops counting in `/metrics`,
   and answers later `/claim`/`/done`/`/tally` with unknown-id 400.

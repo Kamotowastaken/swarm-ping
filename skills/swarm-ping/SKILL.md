@@ -19,15 +19,21 @@ open sockets. Members are HTTP-GET-only.
 ### 1. Host the server
 
 ```
-python ping_server.py [port]        # default 8471
+python ping_server.py 8471
 ```
+
+Stop: kill the process listening on the port (it holds no console).
+Never restart destructively: a restart is TOTAL state loss (board,
+asks, inbox, seq — only `comms.jsonl` survives, write-only, never
+replayed). Launch from the directory that should hold `.swarm/`
+(`SWARM_DIR` resolves once at import).
 
 Set `SWARM_DIR` to a writable path (default `<cwd>/.swarm`). It binds
 `127.0.0.1` only, has **no auth**, never expose it beyond localhost.
 Check `GET {{BASE_URL}}/health` → `{"ok": true}`. Every mutation
 appends JSONL to `<SWARM_DIR>/<run>/comms.jsonl` — that file is the
-audit trail; unread flags are in-memory, so restarts just re-mark
-everything unread (harmless).
+audit trail. Restarts lose everything else (see above), so treat a
+restart as a fresh server with an old log.
 
 ### 2. Start a run
 
@@ -39,8 +45,12 @@ Pick a run id + member ids (`[A-Za-z0-9_-]{1,64}`). Two dispatch shapes:
   members claim-poll unfiltered (`/open?run={{RUN_ID}}&wait=S` — never
   add `protocol=` unless the tasks carry it) until two consecutive
   empty waits, then `/leave`.
-- **Sliced (coupled work only — debates, lens audits):** one disjoint
-  scope per brief with explicit boundaries.
+- **LENSES (coupled work — debates, lens audits):** one disjoint
+  scope per brief with explicit boundaries. Add discussion mode when
+  the run must settle: no `/leave` until every peer entry is
+  agreed/challenged + one fresh re-read shows nothing new (3 empty
+  re-reads with silent peers ⇒ leave with `note=unacked:<ids>`).
+  Signoff posts carry the run protocol with body `SIGN-OFF <peer>:`.
 - **Hybrid (lenses + overflow):** capped lens slices plus a shared
   overflow queue pre-posted by the conductor; pull overflow when your
   lens is done. Post each finding as produced (never batch), ≤10

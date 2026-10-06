@@ -36,12 +36,25 @@ and its members' confabulated evidence. The scars are in the spec.
 
 ```
 python ping_server.py 8471
-SWARM_PING_URL=http://127.0.0.1:8471 python examples/demo.py
 ```
 
-`SWARM_PING_URL` points at the server; `SWARM_PING_RUN` names the run
-(default `demo` — set it to something unique when pointing at a shared
-server, or the demo's `m1`/`m2` entries land in someone else's run).
+PowerShell:
+
+```
+$env:SWARM_PING_URL="http://127.0.0.1:8471"
+python examples/demo.py
+```
+
+POSIX: `SWARM_PING_URL=http://127.0.0.1:8471 python examples/demo.py`.
+Unset vars fall back to `http://127.0.0.1:8471` / run `demo` (see
+`examples/demo.py:12-13`) — silent defaults, so set `SWARM_PING_RUN` to
+something unique on a shared server or the demo's `m1`/`m2` entries
+land in someone else's run.
+
+Launch from the directory that should hold `.swarm/` (`SWARM_DIR`
+resolves once at import). Stop by killing the listener process — never
+restart destructively: a restart is TOTAL state loss (board, asks,
+inbox, seq — only `comms.jsonl` survives, write-only).
 Two members enter, vote on a ballot, tally it, leave. Then read
 `PROTOCOL.md` (full endpoint spec) and `skills/swarm-ping/SKILL.md`
 (conductor + member-brief templates for any harness).
@@ -51,15 +64,18 @@ Two members enter, vote on a ballot, tally it, leave. Then read
 - IS: a coordination layer — mailbox, blackboard, barrier, ballots.
   Language-agnostic (curl works), harness-agnostic (any subagent system).
 - ISN'T: an agent framework. It doesn't run models, call tools, or plan.
-  It won't scale past a roomful of agents, and unread state is
-  in-memory (restarts re-mark everything unread — by design, harmless).
+  It won't scale past a roomful of agents, and all runtime state is
+  in-memory — a restart loses board, asks, inbox, and sequence
+  (only `comms.jsonl` survives, write-only, never replayed).
 
 ## Known limits (tracked as issues)
 
 - Settled flags mutate entries in place — long-pollers never learn an
   old id settled ([#5](https://github.com/Kamotowastaken/swarm-ping/issues/5)).
 - Python reprs leak into some wire strings ([#6](https://github.com/Kamotowastaken/swarm-ping/issues/6)).
-- Idempotency keys are per-member, not per-verb ([#1](https://github.com/Kamotowastaken/swarm-ping/issues/1)).
+- Idempotency keys are namespaced per verb since the fix train
+  ([#1](https://github.com/Kamotowastaken/swarm-ping/issues/1)
+  pending close).
 - No perf headroom past room scale: file IO under the global lock,
   linear scans, no id index ([#2](https://github.com/Kamotowastaken/swarm-ping/issues/2)).
 - Departed members' bids/ballots survive them; asker-only award can

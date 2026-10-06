@@ -13,11 +13,11 @@ Endpoints (all GET, JSON out):
   /peek?run=R&who=B              same, without marking delivered
   /post?run=R&from=A&body=T[&in_reply_to=N][&protocol=P]  append a board entry (threaded)
   /append?run=R&id=N&who=A&body=T  continue your own entry (total stays <=4KB)
-  /finding?run=R&from=A&claim=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P]  structured finding entry
-  Pure creates (/post /finding /ask /send) accept &client_key=K for idempotent replay: repeats return the original id with "replay": true.
+  /finding?run=R&from=A&claim=T|body=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P]  structured finding entry (exactly one of claim=/body=; both together 400)
+  Pure creates (/post /finding /ask /send) accept &client_key=K for idempotent replay: repeats return the original id with "replay": true instead of the echo.
   /resolve?run=R&who=A&verdict=adopt|reject&winners=ids&losers=ids&why=T[&protocol=P]  typed immutable decision; marks entries settled
   /near?run=R&body=T  top-3 similar board entries by word overlap (promote, never suppress)
-  Ballots: /ask gains options=A,B,C for closed questions; /vote?run=R&id=N&who=B&ranking=A,C,B casts a ranked ballot (last-write-wins per member, by design — no per-voter history); /tally?run=R&id=N&who=A auto-emits winner finding + verdict (Borda, no quorum floor by design — 1 ballot settles)
+  Ballots: /ask gains options=A,B,C for closed questions; /vote?run=R&id=N&who=B&ranking=A,C,B casts a ranked ballot (last-write-wins per member, by design — no per-voter history); /tally?run=R&id=N&who=A auto-emits winner finding + verdict (Borda, no quorum floor by design — 1 ballot settles); /fail and /retract refuse ballots that hold votes (400 — tally first)
   /board?run=R&since=N[&wait=S][&protocol=P][&kind=K]  entries id>N; long-poll up to S sec (max 25)
   /retract?run=R&id=N&who=B[&protocol=P]  delete B's own board entry N (tombstone carries protocol; children keep a dangling reply_to — readers must tolerate unresolvable ids)
   Lobby (barrier + help flow + presence):
@@ -27,7 +27,7 @@ Endpoints (all GET, JSON out):
   /lobby?run=R[&wait=S]             -> {"checked_in": [...], "n": k, "open": j, "left": [...], "status": {who: "state[: note]"}, "waited": s} (long-polls until presence/open changes)
   Help flow (modes: fast = first-claim wins; auction = bids then /award):
   /ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P]  post a HELP request (only hop=0 accepted; options= makes it a ballot)
-  /open?run=R[&protocol=P][&wait=S]  unclaimed/unawarded requests younger than 600 s (blocks only while empty; returns at once when entries exist; wake→/claim→409→re-wait)
+  /open?run=R[&protocol=P][&wait=S]  unclaimed/unawarded requests (age runs from the last claim, so claimed work stays visible; blocks only while empty; returns at once when entries exist; wake→/claim→409→re-wait)
   /claim?run=R&id=N&who=B[&eta=M][&note=T]  fast: atomic first-wins; auction: bid
   /award?run=R&id=N&who=A&winner=B  asker picks the winning bid
   /done?run=R&id=N&who=B&body=T[&protocol=P]  winner posts result (board + inbox notice)
@@ -36,7 +36,7 @@ Endpoints (all GET, JSON out):
   /unsubscribe?run=R&who=B&topic=TAG
   /transcript?run=R                 markdown render of the run's board
 
-  Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total; /tally returns {ok,winner,ranked,scores,finding,verdict} instead). /board replies carry "waited" seconds.
+  Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (fixed-format signoff posts are exempt from the warn) (/append echoes the snippet plus "entry_len" total; /tally returns {ok,winner,ranked,scores,finding,verdict} instead). /board replies carry "waited" seconds.
 
 Rules: run/who/from/to/need/topic/protocol/client_key/options/winner match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 on bad input; 409 only on lost races (live-claim/award conflicts) and post-resolution writes. Unknown params are ignored but echoed back under "ignored" on 200 replies — a misspelled param fails by doing nothing, loudly.
 Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/tally/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
@@ -245,10 +245,16 @@ class Store:
                     a = self.asks.get((run, nid))
                     if a is not None and (
                             self._claim_live(a, time.time()) or
-                            time.time() - a["ts"] < ASK_TTL):
+                            not self._ask_expired(a, time.time())):
                         return {"ok": False,
                                 "error": "ask live — /fail or /done it "
                                          "first (claimed work would orphan)"}
+                    if a is not None and a.get("options") and \
+                            a["ballots"]:
+                        return {"ok": False,
+                                "error": f"ballot holds "
+                                         f"{len(a['ballots'])} vote(s) — "
+                                         "/tally it first"}
                     del entries[i]
                     self._log(run, {"kind": "retract", "run": run,
                                     "id": nid, "from": who})
@@ -336,13 +342,9 @@ class Store:
             now = time.time()
             open_n = 0
             for (r, _), a in self.asks.items():
-                if r != run or now - a["ts"] >= ASK_TTL:
+                if r != run or self._ask_expired(a, now):
                     continue
-                if a.get("options"):
-                    continue  # ballots resolve via /tally, not claims
-                if a["mode"] == "auction" and not a["awarded"]:
-                    open_n += 1
-                elif not self._claim_live(a, now):
+                if self._ask_open(a, now):
                     open_n += 1
             return {"checked_in": checked, "n": len(checked),
                     "open": open_n, "left": left, "status": status}
@@ -365,10 +367,9 @@ class Store:
                 runs.update(d)
             runs.update(r for (r, _) in self.asks)
             now = time.time()
-            open_n = sum(1 for (r, _), a in self.asks.items()
-                         if now - a["ts"] < ASK_TTL and not a.get("options")
-                         and not self._claim_live(a, now)
-                         and not (a["mode"] == "auction" and a["awarded"]))
+            open_n = sum(1 for a in self.asks.values()
+                         if not self._ask_expired(a, now)
+                         and self._ask_open(a, now))
             members = set()
             for d in (self.present, self.departed):
                 for who in d.values():
@@ -401,13 +402,15 @@ class Store:
     def ask(self, run, frm, need, body, hop, mode, protocol,
             options=None):
         with self.lock:
+            composed = f"NEED {need} [{mode}] (hop {hop}): {body}" + \
+                       (f" options={','.join(options)}" if options else "")
+            if len(composed.encode("utf-8")) > BODY_MAX:
+                return {"ok": False,
+                        "error": "composed entry over 4KB — shorten body"}
             self.seq += 1
             nid = self.seq
             entry = {"id": nid, "kind": "help", "protocol": protocol,
-                     "ts": time.time(), "from": frm,
-                     "body": f"NEED {need} [{mode}] (hop {hop}): {body}" +
-                             (f" options={','.join(options)}"
-                              if options else "")}
+                     "ts": time.time(), "from": frm, "body": composed}
             self.board.setdefault(run, []).append(entry)
             self.asks[(run, nid)] = {"from": frm, "need": need,
                                      "body": body, "ts": entry["ts"],
@@ -427,19 +430,35 @@ class Store:
                                f"{body[:HEAD_LEN]}"[:BODY_MAX]}
                 self.inbox.setdefault((run, sub), []).append(msg)
                 self._log(run, {"kind": "msg", **msg})
-            return nid
+            return {"ok": True, "id": nid}
 
     def _claim_live(self, a, now):
         # A claim holds only inside ASK_TTL; older claims are dead helpers
         # whose work anyone may steal. Lazy expiry — no background thread.
         return bool(a["claimed_by"]) and now - a["claimed_ts"] < ASK_TTL
 
+    def _ask_expired(self, a, now):
+        # Ask age runs from the last claim, not from posting: work
+        # claimed at ask-age 599s stays the claimer's for a full window
+        # instead of dying 1s later. Unclaimed asks expire at ASK_TTL.
+        return now - max(a["ts"], a.get("claimed_ts") or 0) >= ASK_TTL
+
+    def _ask_open(self, a, now):
+        # Single countable-open predicate shared by /lobby and /metrics:
+        # ballots resolve via /tally, unawarded auctions await bids,
+        # everything else is open unless a live claim holds it.
+        if a.get("options"):
+            return False
+        if a["mode"] == "auction" and not a["awarded"]:
+            return True
+        return not self._claim_live(a, now)
+
     def open_asks(self, run, protocol=None):
         with self.lock:
             now = time.time()
             out = []
             for (r, nid), a in sorted(self.asks.items()):
-                if r != run or now - a["ts"] >= ASK_TTL:
+                if r != run or self._ask_expired(a, now):
                     continue
                 if protocol and a.get("protocol") != protocol:
                     continue
@@ -530,16 +549,26 @@ class Store:
 
     def fail(self, run, nid, who, body):
         # asker-only: declare the request dead (kind=failure on board).
+        # Ballots are exempt: cast votes belong to the voters, and
+        # /fail used to shed them silently (200, then /tally 400).
         with self.lock:
             a = self.asks.get((run, nid))
             if a is None:
                 return {"ok": False, "error": "unknown request id"}
             if a["from"] != who:
                 return {"ok": False, "error": "only the asker fails"}
+            if a.get("options") and a["ballots"]:
+                return {"ok": False,
+                        "error": f"ballot holds {len(a['ballots'])} "
+                                 "vote(s) — /tally it instead"}
+            composed = f"FAILED {nid} ({a['need']}): {body}"
+            if len(composed.encode("utf-8")) > BODY_MAX:
+                return {"ok": False,
+                        "error": "composed entry over 4KB — shorten body"}
             self.seq += 1
             entry = {"id": self.seq, "kind": "failure", "ts": time.time(),
                      "from": who, "protocol": a.get("protocol", "general"),
-                     "body": f"FAILED {nid} ({a['need']}): {body}"}
+                     "body": composed}
             self.board.setdefault(run, []).append(entry)
             for e in self.board.get(run, []):
                 if e["id"] == nid:
@@ -559,10 +588,14 @@ class Store:
                     return {"id": hit, "replay": True}
             nid = thunk()
             if isinstance(nid, dict):
-                # finding composes id+body; the key stores the id only
+                # finding composes id+body; the key stores the id only.
+                # Error dicts (over-cap composed entries) pass through
+                # with id None so the handler can 400 with the reason.
                 out = {"id": nid.get("id")}
                 if nid.get("body"):
                     out["body"] = nid["body"]
+                if nid.get("error"):
+                    out["error"] = nid["error"]
                 nid = out["id"]
             else:
                 out = {"id": nid}
@@ -591,12 +624,15 @@ class Store:
                                  f"immutable; post a new one instead"}
             self.seq += 1
             nid = self.seq
+            composed = f"VERDICT {verdict} " \
+                       f"winners={winners} losers={losers}: {why}"
+            if len(composed.encode("utf-8")) > BODY_MAX:
+                return {"ok": False,
+                        "error": "composed entry over 4KB — shorten why"}
             entry = {"id": nid, "kind": "verdict", "ts": time.time(),
                      "from": who, "protocol": protocol,
                      "verdict": verdict, "winners": winners,
-                     "losers": losers,
-                     "body": f"VERDICT {verdict} "
-                             f"winners={winners} losers={losers}: {why}"}
+                     "losers": losers, "body": composed}
             board.append(entry)
             for e in board:
                 if e["id"] in winners + losers:
@@ -711,9 +747,12 @@ class Store:
                         "error": f"claimed by {a['claimed_by']}"}
             self.seq += 1
             rid = self.seq
+            composed = f"RESOLVED {nid} for {a['from']}: {body}"
+            if len(composed.encode("utf-8")) > BODY_MAX:
+                return {"ok": False,
+                        "error": "composed entry over 4KB — shorten body"}
             entry = {"id": rid, "kind": "resolution", "ts": time.time(),
-                     "from": who, "protocol": protocol,
-                     "body": f"RESOLVED {nid} for {a['from']}: {body}"}
+                     "from": who, "protocol": protocol, "body": composed}
             self.board.setdefault(run, []).append(entry)
             for e in self.board.get(run, []):
                 if e["id"] == nid:
@@ -741,7 +780,11 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.flush()
 
     def _qs(self):
-        return parse_qs(urlparse(self.path).query)
+        # keep_blank_values: an explicit but empty protocol= must reach
+        # validation (400), not silently become the default. On repeats
+        # the first value wins — documented in PROTOCOL.md.
+        return parse_qs(urlparse(self.path).query,
+                        keep_blank_values=True)
 
     def _one(self, qs, key, default=None):
         v = qs.get(key, [default])[0]
@@ -803,7 +846,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/peek?run=R&who=B",
                 "/post?run=R&from=A&body=T[&in_reply_to=N][&protocol=P][&client_key=K]",
                 "/append?run=R&id=N&who=A&body=T",
-                "/finding?run=R&from=A&claim=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P][&client_key=K]",
+                "/finding?run=R&from=A&claim=T|body=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P][&client_key=K]",
                 "/resolve?run=R&who=A&verdict=adopt|reject&winners=ids&losers=ids&why=T[&protocol=P]",
                 "/near?run=R&body=T",
                 "/vote?run=R&id=N&who=B&ranking=A,C,B",
@@ -889,7 +932,10 @@ class Handler(BaseHTTPRequestHandler):
             if nid is None:
                 return self._bad(f"unknown reply target {reply_to} "
                                  f"in run {run}")
-            return self._send_json(200, self._echo(nid, body))
+            out = self._echo(nid, body)
+            if protocol == "signoff":
+                out.pop("warn", None)  # fixed-format signoffs can't split
+            return self._send_json(200, out)
         if path == "/board":
             try:
                 since = int(self._one(qs, "since", "0"))
@@ -1045,8 +1091,9 @@ class Handler(BaseHTTPRequestHandler):
             note = self._one(qs, "note", "")
             if not who or not NAME.match(who):
                 return self._bad("bad who (your member id — this route wants who=, not from=)")
-            if not self._body_ok(note):
-                return self._bad("note over 4KB")
+            if len(note.encode("utf-8")) > BODY_MAX - 128:
+                return self._bad("note with its clock-out line would "
+                                 "exceed 4KB — shorten it")
             protocol = self._proto(qs)
             if protocol is None:
                 return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
@@ -1106,6 +1153,9 @@ class Handler(BaseHTTPRequestHandler):
             if res.get("replay"):
                 return self._send_json(200, res)
             nid = res["id"]
+            if nid is None:
+                return self._bad(res.get("error", "composed entry over "
+                                                  "4KB — shorten body"))
             out = self._echo(nid, body)
             out["hint"] = "helpers claim via /claim; watch your /inbox " \
                           "for RESOLVED"
