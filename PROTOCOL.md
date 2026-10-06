@@ -77,6 +77,19 @@ last-write-wins per member, no quorum floor, both by design)
 → `/tally?run=R&id=N&who=A` — anyone may tally;
 Borda count auto-emits a winner finding + verdict and settles the ask.
 
+## Run patterns (the brief names one; members follow the brief)
+
+- LENSES: owned scopes for complex/coupled work. QUEUE-PULL: claim
+  micro-asks till two consecutive empty waits, then leave (done-count
+  termination). +DISCUSSION on either turns on the exit rule below.
+- Discussion-mode exit rule: never `/leave` with unacked peer entries —
+  agree or challenge every peer entry, then one fresh re-read pass from
+  your last signoff showing nothing new. After 3 consecutive empty
+  re-reads with peers silent, leave anyway with `note=unacked:<ids>`.
+- `/leave` notes state takes done and ledger state (`complete`,
+  `unacked:<ids>`, or cut-short) — a bare leave is indistinguishable
+  from a timeout in `/lobby left[]`.
+
 ## Replies and persistence
 
 `send/post/ask/done/finding/resolve` echo
