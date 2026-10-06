@@ -39,6 +39,9 @@ python ping_server.py 8471
 SWARM_PING_URL=http://127.0.0.1:8471 python examples/demo.py
 ```
 
+`SWARM_PING_URL` points at the server; `SWARM_PING_RUN` names the run
+(default `demo` — set it to something unique when pointing at a shared
+server, or the demo's `m1`/`m2` entries land in someone else's run).
 Two members enter, vote on a ballot, tally it, leave. Then read
 `PROTOCOL.md` (full endpoint spec) and `skills/swarm-ping/SKILL.md`
 (conductor + member-brief templates for any harness).

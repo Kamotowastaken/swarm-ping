@@ -22,7 +22,7 @@ Endpoints (all GET, JSON out):
   Lobby (barrier + help flow + presence):
   /enter?run=R&who=B             check into the lobby (re-entry clears a leave)
   /leave?run=R&who=B[&note=T]    clock out: drops from active, releases live claims held, announces on board
-  /status?run=R&who=B&state=working|idle[&note=T]  advisory only — never gates; "quiet but around" vs gone
+  /status?run=R&who=B&state=working|idle[&note=T]  advisory only — never affects matching/gating, but check-in is required
   /lobby?run=R[&wait=S]             -> {"checked_in": [...], "n": k, "open": j, "left": [...], "status": {who: "state[: note]"}, "waited": s} (long-polls until presence/open changes)
   Help flow (modes: fast = first-claim wins; auction = bids then /award):
   /ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P]  post a HELP request (only hop=0 accepted; options= makes it a ballot)
@@ -37,7 +37,7 @@ Endpoints (all GET, JSON out):
 
 Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total). /board replies carry "waited" seconds.
 
-Rules: run/who/from/to/need/topic/protocol match [A-Za-z0-9_-]{1,64}; body <= 4KB. 400 otherwise (409 on lost claim races and post-resolution writes).
+Rules: run/who/from/to/need/topic/protocol match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 otherwise (409 on lost claim races and post-resolution writes).
 Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
 (env SWARM_DIR, default <cwd>/.swarm). Unread state is in-memory only — a
 server restart marks everything unread again (members re-drain; harmless).
@@ -82,7 +82,7 @@ class Store:
                         #  claimed_ts, mode, bids, awarded, protocol,
                         #  options, ballots}
         self.subs = {}  # (run, topic) -> set(who) need-tag subscriptions
-        self.keys = {}  # (run, client_key) -> entry id (idempotent replay)
+        self.keys = {}  # (run, frm, key) -> entry id (idempotent replay)
 
     def _log(self, run, record):
         try:
@@ -574,8 +574,8 @@ class Store:
             vid = self.seq
             ventry = {"id": vid, "kind": "verdict", "ts": time.time(),
                       "from": who, "protocol": a.get("protocol", "general"),
-                      "verdict": "adopt", "winners": [winner],
-                      "losers": ranked[1:],
+                      "verdict": "adopt", "winners": [fid],
+                      "losers": [],
                       "body": f"VERDICT adopt (ballot): {winner} wins, "
                               f"losers={ranked[1:]}"}
             self.board.setdefault(run, []).append(ventry)
@@ -723,6 +723,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad to (member id or 'all')")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             key = self._one(qs, "client_key", "")
             if key and not NAME.match(key):
                 return self._bad("bad client_key (want "
@@ -938,6 +940,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "not spawn new requests")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             protocol = self._proto(qs)
             if protocol is None:
                 return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
@@ -1015,6 +1019,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad who (your member id)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             protocol = self._proto(qs)
             if protocol is None:
                 return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
@@ -1036,6 +1042,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad who (your member id)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             res = STORE.fail(run, nid, who, body)
             if res["ok"]:
                 out = self._echo(res["id"], body)
@@ -1071,6 +1079,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad who (your member id)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
+            if not body:
+                return self._bad("bad body (required, non-empty)")
             res = STORE.append(run, nid, who, body)
             if res["ok"]:
                 out = self._echo(res["id"], body)

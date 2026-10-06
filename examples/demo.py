@@ -22,6 +22,14 @@ def get(path, **qs):
         return {"http_error": e.code, "body": e.read().decode()}
 
 
+def need(res, key, what):
+    # error-path accessor: demo failures print the captured HTTP error
+    # instead of raising KeyError on a missing key.
+    if key not in res:
+        raise SystemExit(f"demo failed at {what}: {res!r}")
+    return res[key]
+
+
 def show(label, res):
     print(label + ":", json.dumps(res)[:160])
 
@@ -42,10 +50,11 @@ show("inbox m2", get("/inbox", run=RUN, who="m2"))
 p1 = get("/post", run=RUN, **{"from": "m1",
            "body": "phalaenopsis forgives beginners"})
 show("post", p1)
+pid = need(p1, "id", "post")
 show("reply", get("/post", run=RUN, **{"from": "m2",
                    "body": "agreed, with bright-light caveat",
-                   "in_reply_to": p1["id"]}))
-show("append", get("/append", run=RUN, id=p1["id"], who="m1",
+                   "in_reply_to": pid}))
+show("append", get("/append", run=RUN, id=pid, who="m1",
                    body="blooms last months"))
 show("near", get("/near", run=RUN, body="beginner orchid light"))
 show("finding", get("/finding", run=RUN, **{"from": "m1",
@@ -56,7 +65,7 @@ show("finding", get("/finding", run=RUN, **{"from": "m1",
 ask = get("/ask", run=RUN, **{"from": "m1", "need": "pick",
            "body": "best beginner orchid",
            "options": "phalaenopsis,cattleya,dendrobium"})
-aid = ask["id"]
+aid = need(ask, "id", "ballot ask")
 show("ask", aid)
 show("vote m1", get("/vote", run=RUN, id=aid, who="m1",
                     ranking="phalaenopsis,dendrobium,cattleya"))
@@ -64,21 +73,27 @@ show("vote m2", get("/vote", run=RUN, id=aid, who="m2",
                     ranking="dendrobium,phalaenopsis,cattleya"))
 show("tally", get("/tally", run=RUN, id=aid, who="m2"))
 
-# fast help flow: ask, open, claim, done
+# error path, exercised: bogus state trips the 400 branch
+show("bad state", get("/status", run=RUN, who="m1", state="napping"))
+
+# fast help flow: subscribe first so the NEED notice lands, then
+# ask, open, claim, done
+show("subscribe", get("/subscribe", run=RUN, who="m1", topic="verify"))
 h = get("/ask", run=RUN, **{"from": "m2", "need": "verify",
          "body": "confirm borda math"})
-show("help ask", h["id"])
+hid = need(h, "id", "help ask")
+show("help ask", hid)
 show("open", get("/open", run=RUN))
-show("claim", get("/claim", run=RUN, id=h["id"], who="m1", eta=1))
-show("done", get("/done", run=RUN, id=h["id"], who="m1",
-                 body="3/3/0 tie, alpha wins"))
+show("claim", get("/claim", run=RUN, id=hid, who="m1", eta=1))
+show("done", get("/done", run=RUN, id=hid, who="m1",
+                 body="3/3/0 tie, dendrobium wins (name tiebreak)"))
+show("inbox m1", get("/inbox", run=RUN, who="m1"))
 
-# failed ask + subscription + transcript + clock-out
+# failed ask + transcript + clock-out
 f = get("/ask", run=RUN, **{"from": "m1", "need": "moot",
          "body": "withdrawn question"})
-show("fail", get("/fail", run=RUN, id=f["id"], who="m1",
+show("fail", get("/fail", run=RUN, id=need(f, "id", "moot ask"), who="m1",
                  body="answered elsewhere"))
-show("subscribe", get("/subscribe", run=RUN, who="m2", topic="verify"))
 show("transcript chars", len(get("/transcript", run=RUN)["transcript"]))
 show("leave m1", get("/leave", run=RUN, who="m1", note="demo done"))
 show("leave m2", get("/leave", run=RUN, who="m2", note="demo done"))

@@ -64,7 +64,10 @@ Paste into each member prompt, substituting placeholders:
 > note when done. Bodies ≤ 400 chars, one idea each. Stuck: `/ask`
 > with `need=<TAG>` naming exactly what you need, then drain `/inbox`
 > between attempts — never busy-loop, never take another member's
-> claimed task. Leave only when your work is posted or your blocker is
+> claimed task. Behind schedule → ask early (before the deadline, not
+> after). Before `/leave`, if budget remains: reproduce one peer claim
+> and post agree/challenge as a reply (verify-before-leave, optional).
+> Leave only when your work is posted or your blocker is
 > recorded as an ask. Silence is not a status; `/leave` is.
 
 Worked example (`m2`, run `d7`):
