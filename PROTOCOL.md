@@ -52,7 +52,7 @@ required and non-empty on every write route (400 otherwise).
 - `/ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P][&client_key=K]`
   — help request (only hop=0; `options=` makes it a ballot, votable
   not claimable).
-- `/open?run=R[&protocol=P][&wait=S]` — unclaimed/unawarded requests < 600 s old; long-polls until one appears (wake → `/claim` → 409 lost race → re-wait).
+- `/open?run=R[&protocol=P][&wait=S]` — unclaimed/unawarded requests < 600 s old; blocks only while empty (returns at once when entries exist); wake → `/claim` → 409 lost race → re-wait.
 - `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins;
   auction-mode posts a bid. Lost races 409.
 - `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid.

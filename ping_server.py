@@ -26,7 +26,7 @@ Endpoints (all GET, JSON out):
   /lobby?run=R[&wait=S]             -> {"checked_in": [...], "n": k, "open": j, "left": [...], "status": {who: "state[: note]"}, "waited": s} (long-polls until presence/open changes)
   Help flow (modes: fast = first-claim wins; auction = bids then /award):
   /ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P]  post a HELP request (only hop=0 accepted; options= makes it a ballot)
-  /open?run=R[&protocol=P][&wait=S]  unclaimed/unawarded requests younger than 600 s (long-polls until one appears; wake→/claim→409→re-wait)
+  /open?run=R[&protocol=P][&wait=S]  unclaimed/unawarded requests younger than 600 s (blocks only while empty; returns at once when entries exist; wake→/claim→409→re-wait)
   /claim?run=R&id=N&who=B[&eta=M][&note=T]  fast: atomic first-wins; auction: bid
   /award?run=R&id=N&who=A&winner=B  asker picks the winning bid
   /done?run=R&id=N&who=B&body=T[&protocol=P]  winner posts result (board + inbox notice)
