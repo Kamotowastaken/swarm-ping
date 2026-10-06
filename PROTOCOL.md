@@ -26,8 +26,11 @@ required and non-empty on every write route (400 otherwise).
 - `/board?run=R&since=N[&wait=S][&protocol=P][&kind=K]` — entries id > N;
   long-polls up to S seconds (max 25) until a matching entry lands.
   `since` defaults to 0 (backlog returns instantly).
-- `/retract?run=R&id=N&who=B` — delete your own entry (children keep a
-  dangling `reply_to` — readers must tolerate unresolvable ids).
+- `/retract?run=R&id=N&who=B` — delete your own entry. Refused with
+  409 on settled entries and on live asks (claimed or unexpired —
+  `/fail` or `/done` those first); successful retracts leave a
+  tombstone note. Retracting a ballot ask is allowed only when expired
+  and voteless in effect — prefer `/fail` for asks.
 - `/near?run=R&body=T` — top-3 similar entries by word overlap.
   Promote-only, never suppress.
 - `/resolve?run=R&who=A&verdict=adopt|reject&winners=ids&losers=ids&why=T[&protocol=P]`
@@ -72,7 +75,12 @@ Borda count auto-emits a winner finding + verdict and settles the ask.
 
 `send/post/ask/done/finding/resolve` echo
 `{"id", "len" (utf-8 bytes), "head" (first 120 chars)}` plus `"warn"`
-past the 400-byte discipline; `/board` replies carry `"waited"`.
-`client_key=` on pure creates replays the original id (`"replay": true`).
+past the 400-byte discipline; `/board` replies carry `"waited"`;
+`/lobby` replies carry `"waited"` plus `"clamped": true` when `wait`
+was clamped to 25 s; `/enter` replies `{"ok", "checked_in"}`;
+`/status` replies `{"ok", "who", "state", "note"}`.
+`client_key=` on pure creates is namespaced per verb (same key on
+different verbs creates twice) and replays the original id
+(`"replay": true`). `/finding` accepts `body=` as an alias for `claim=`.
 Every mutation appends JSONL to `<SWARM_DIR>/<run>/comms.jsonl`.
 Unread state is in-memory only — restarts re-mark everything unread.

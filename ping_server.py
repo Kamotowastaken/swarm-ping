@@ -82,7 +82,7 @@ class Store:
                         #  claimed_ts, mode, bids, awarded, protocol,
                         #  options, ballots}
         self.subs = {}  # (run, topic) -> set(who) need-tag subscriptions
-        self.keys = {}  # (run, frm, key) -> entry id (idempotent replay)
+        self.keys = {}  # (run, frm, verb, key) -> entry id (replay)
 
     def _log(self, run, record):
         try:
@@ -154,6 +154,11 @@ class Store:
         with self.lock:
             for e in self.board.get(run, []):
                 if e["id"] == nid and e["from"] == who:
+                    if e.get("settled"):
+                        return {"ok": False,
+                                "error": "already settled — "
+                                         "post-resolution writes go through "
+                                         "/resolve"}
                     if e.get("kind") not in ("note", "finding"):
                         return {"ok": False,
                                 "error": "only note/finding entries grow"}
@@ -194,13 +199,34 @@ class Store:
             entries = self.board.get(run, [])
             for i, e in enumerate(entries):
                 if e["id"] == nid and e["from"] == who:
+                    if e.get("settled"):
+                        return {"ok": False,
+                                "error": "already settled — "
+                                         "post-resolution writes go through "
+                                         "/resolve"}
+                    a = self.asks.get((run, nid))
+                    if a is not None and (
+                            self._claim_live(a, time.time()) or
+                            time.time() - a["ts"] < ASK_TTL):
+                        return {"ok": False,
+                                "error": "ask live — /fail or /done it "
+                                         "first (claimed work would orphan)"}
                     del entries[i]
                     self._log(run, {"kind": "retract", "run": run,
                                     "id": nid, "from": who})
                     if (run, nid) in self.asks:
                         del self.asks[(run, nid)]
-                    return True
-            return False
+                    self.seq += 1
+                    tomb = {"id": self.seq, "kind": "note",
+                            "ts": time.time(), "from": who,
+                            "protocol": "general",
+                            "body": f"retracted entry {nid}"}
+                    self.board.setdefault(run, []).append(tomb)
+                    self._log(run, {"kind": "note", "run": run, **tomb})
+                    return {"ok": True, "retracted": nid,
+                            "tombstone": self.seq}
+            return {"ok": False,
+                    "error": f"entry {nid} not found or not yours"}
 
     def enter(self, run, who):
         with self.lock:
@@ -257,7 +283,7 @@ class Store:
                 "state": state, "note": note, "ts": time.time()}
             self._log(run, {"kind": "status", "run": run, "from": who,
                             "state": state, "note": note})
-            return {"ok": True, "who": who, "state": state}
+            return {"ok": True, "who": who, "state": state, "note": note}
 
     def lobby(self, run):
         with self.lock:
@@ -319,7 +345,8 @@ class Store:
             entry = {"id": nid, "kind": "help", "protocol": protocol,
                      "ts": time.time(), "from": frm,
                      "body": f"NEED {need} [{mode}] (hop {hop}): {body}" +
-                             (f" options={options}" if options else "")}
+                             (f" options={','.join(options)}"
+                              if options else "")}
             self.board.setdefault(run, []).append(entry)
             self.asks[(run, nid)] = {"from": frm, "need": need,
                                      "body": body, "ts": entry["ts"],
@@ -457,16 +484,18 @@ class Store:
             self._log(run, {"kind": "failure", "run": run, **entry})
             return {"ok": True, "id": entry["id"]}
 
-    def create_once(self, run, frm, key, thunk):
-        # atomic check-and-create under one RLock hold.
+    def create_once(self, run, frm, verb, key, thunk):
+        # atomic check-and-create under one RLock hold. Keys are
+        # namespaced per verb: the same key on /post vs /ask creates
+        # twice (cross-verb replay used to drop writes silently).
         with self.lock:
             if key:
-                hit = self.keys.get((run, frm, key))
+                hit = self.keys.get((run, frm, verb, key))
                 if hit is not None:
                     return {"id": hit, "replay": True}
             nid = thunk()
             if key and nid is not None:
-                self.keys[(run, frm, key)] = nid
+                self.keys[(run, frm, verb, key)] = nid
             return {"id": nid}
 
     def resolve(self, run, who, verdict, winners, losers, why, protocol):
@@ -557,16 +586,17 @@ class Store:
                     scores[opt] += pts
             ranked = sorted(scores, key=lambda o: (-scores[o], o))
             winner = ranked[0]
+            borda = ",".join(f"{o}={scores[o]}" for o in ranked)
             self.seq += 1
             fid = self.seq
             fentry = {"id": fid, "kind": "finding", "ts": time.time(),
                       "from": who, "protocol": a.get("protocol", "general"),
                       "claim": f"BALLOT {nid}: {winner} wins "
                                f"({len(a['ballots'])} ballots)",
-                      "evidence": f"borda {scores}", "quote": "",
+                      "evidence": f"borda {borda}", "quote": "",
                       "etype": "asserted", "scope": "", "confidence": "high",
                       "body": f"BALLOT {nid}: {winner} wins | "
-                              f"borda {scores} | "
+                              f"borda {borda} | "
                               f"ballots {len(a['ballots'])}"}
             self.board.setdefault(run, []).append(fentry)
             self._log(run, {"kind": "finding", "run": run, **fentry})
@@ -577,7 +607,7 @@ class Store:
                       "verdict": "adopt", "winners": [fid],
                       "losers": [],
                       "body": f"VERDICT adopt (ballot): {winner} wins, "
-                              f"losers={ranked[1:]}"}
+                              f"losers={','.join(ranked[1:])}"}
             self.board.setdefault(run, []).append(ventry)
             for e in self.board.get(run, []):
                 if e["id"] in (nid, fid):
@@ -729,7 +759,7 @@ class Handler(BaseHTTPRequestHandler):
             if key and not NAME.match(key):
                 return self._bad("bad client_key (want "
                                  "[A-Za-z0-9_-]{1,64})")
-            res = STORE.create_once(run, frm, key,
+            res = STORE.create_once(run, frm, "send", key,
                                     lambda: STORE.send(run, frm, to, body))
             if res.get("replay"):
                 return self._send_json(200, res)
@@ -761,7 +791,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad client_key (want "
                                  "[A-Za-z0-9_-]{1,64})")
             res = STORE.create_once(
-                run, frm, key,
+                run, frm, "post", key,
                 lambda: STORE.post(run, frm, body, reply_to, protocol))
             if res.get("replay"):
                 return self._send_json(200, res)
@@ -875,21 +905,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
                 return self._bad("bad who (your member id)")
-            if STORE.retract(run, nid, who):
-                return self._send_json(200, {"retracted": nid})
-            return self._bad(f"entry {nid} not found or not yours")
+            res = STORE.retract(run, nid, who)
+            if res["ok"]:
+                return self._send_json(200, res)
+            if res["error"].startswith("already settled") or \
+                    res["error"].startswith("ask live"):
+                return self._send_json(409, res)
+            return self._bad(res["error"])
         if path == "/enter":
             who = self._one(qs, "who", "")
             if not who or not NAME.match(who):
                 return self._bad("bad who (your member id)")
             return self._send_json(
-                200, {"checked_in": STORE.enter(run, who)})
+                200, {"ok": True,
+                      "checked_in": STORE.enter(run, who)})
         if path == "/lobby":
             try:
-                wait = min(max(int(self._one(qs, "wait", "0")), 0),
-                           WAIT_MAX)
+                asked = int(self._one(qs, "wait", "0"))
             except ValueError:
                 return self._bad(f"bad wait (want 0-{WAIT_MAX} seconds)")
+            wait = min(max(asked, 0), WAIT_MAX)
+            clamped = asked != wait
             first = STORE.lobby(run)
             deadline = time.time() + wait
             cur = first
@@ -901,6 +937,8 @@ class Handler(BaseHTTPRequestHandler):
             out = dict(cur)
             out["waited"] = round(wait - max(deadline - time.time(), 0),
                                   1)
+            if clamped:
+                out["clamped"] = True
             return self._send_json(200, out)
         if path == "/leave":
             who = self._one(qs, "who", "")
@@ -958,7 +996,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad client_key (want "
                                  "[A-Za-z0-9_-]{1,64})")
             res = STORE.create_once(
-                run, frm, key,
+                run, frm, "ask", key,
                 lambda: STORE.ask(run, frm, need, body, hop, mode,
                                   protocol, options))
             if res.get("replay"):
@@ -1103,6 +1141,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = self._echo(res["id"], body)
                 out["entry_len"] = res["len"]
                 return self._send_json(200, out)
+            if res["error"].startswith("already settled"):
+                return self._send_json(409, res)
             # same class as /retract's not-found: client-addressable 400
             return self._bad(res["error"])
         if path == "/finding":
@@ -1115,6 +1155,10 @@ class Handler(BaseHTTPRequestHandler):
             confidence = self._one(qs, "confidence", "medium")
             if not frm or not NAME.match(frm):
                 return self._bad("bad from (your member id, e.g. from=m1)")
+            if not claim:
+                # tolerant reader: body= aliases claim= (unknown params
+                # are otherwise ignored, which used to drop prose silently)
+                claim = self._one(qs, "body", "")
             if not claim:
                 return self._bad("bad claim (required, keep it one line)")
             if etype not in ("observed", "asserted"):
@@ -1133,7 +1177,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad client_key (want "
                                  "[A-Za-z0-9_-]{1,64})")
             res = STORE.create_once(
-                run, frm, key,
+                run, frm, "finding", key,
                 lambda: STORE.finding(run, frm, claim, evidence, quote,
                                       etype, scope, confidence, protocol))
             if res.get("replay"):
