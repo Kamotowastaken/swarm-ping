@@ -6,6 +6,7 @@ sockets), so every operation here is a GET with query params. The conductor
 
 Endpoints (all GET, JSON out):
   /health                        -> {"ok": true}
+  /metrics                       -> {"runs","board_entries","asks_live","asks_open","members_ever","seq","uptime_s"}
   /endpoints                     -> {"endpoints": [...]} (discovery listing)
   /send?run=R&from=A&to=B|all&body=T   store a direct message
   /inbox?run=R&who=B             return unread for B (direct + to=all)
@@ -72,6 +73,7 @@ class Store:
         # so nested store calls must re-enter.
         self.lock = threading.RLock()
         self.seq = 0
+        self.t0 = time.time()  # process start, for /metrics uptime
         self.inbox = {}  # (run, who) -> [msg]; never deleted (see drain)
         self.board = {}  # run -> [entry]
         self.delivered = set()  # (run, who, msg-id): at-most-once per reader
@@ -318,6 +320,28 @@ class Store:
             s = self.subs.get((run, topic), set())
             s.discard(who)
             return sorted(s)
+
+    def metrics(self):
+        with self.lock:
+            runs = set()
+            for d in (self.board, self.present, self.departed):
+                runs.update(d)
+            runs.update(r for (r, _) in self.asks)
+            now = time.time()
+            open_n = sum(1 for (r, _), a in self.asks.items()
+                         if now - a["ts"] < ASK_TTL and not a.get("options")
+                         and not self._claim_live(a, now)
+                         and not (a["mode"] == "auction" and a["awarded"]))
+            members = set()
+            for d in (self.present, self.departed):
+                for who in d.values():
+                    members.update(who)
+            return {"runs": len(runs),
+                    "board_entries": sum(len(v)
+                                         for v in self.board.values()),
+                    "asks_live": len(self.asks), "asks_open": open_n,
+                    "members_ever": len(members), "seq": self.seq,
+                    "uptime_s": round(now - self.t0, 1)}
 
     def transcript(self, run):
         with self.lock:
@@ -710,9 +734,12 @@ class Handler(BaseHTTPRequestHandler):
         qs = self._qs()
         if path == "/health":
             return self._send_json(200, {"ok": True})
+        if path == "/metrics":
+            return self._send_json(200, STORE.metrics())
         if path == "/endpoints":
             return self._send_json(200, {"endpoints": [
                 "/health",
+                "/metrics",
                 "/endpoints",
                 "/send?run=R&from=A&to=B|all&body=T[&client_key=K]",
                 "/inbox?run=R&who=B",
@@ -754,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
             frm, to = self._one(qs, "from", ""), self._one(qs, "to", "")
             body = self._one(qs, "body", "")
             if not frm or not NAME.match(frm):
-                return self._bad("bad from (your member id, e.g. from=m1)")
+                return self._bad("bad from (your member id, e.g. from=m1 — this route wants from=, not who=)")
             if not to or (to != "all" and not NAME.match(to)):
                 return self._bad("bad to (member id or 'all')")
             if not self._body_ok(body):
@@ -780,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
             frm = self._one(qs, "from", "")
             body = self._one(qs, "body", "")
             if not frm or not NAME.match(frm):
-                return self._bad("bad from (your member id, e.g. from=m1)")
+                return self._bad("bad from (your member id, e.g. from=m1 — this route wants from=, not who=)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
             if not body:
@@ -848,7 +875,7 @@ class Handler(BaseHTTPRequestHandler):
                     return None
             winners, losers = _ids("winners"), _ids("losers")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if verdict not in ("adopt", "reject"):
                 return self._bad("bad verdict (want adopt|reject)")
             if winners is None or losers is None:
@@ -884,13 +911,15 @@ class Handler(BaseHTTPRequestHandler):
             ranking = [r for r in self._one(qs, "ranking", "").split(",")
                        if r]
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not ranking:
                 return self._bad("bad ranking (want csv, e.g. A,C,B)")
             res = STORE.vote(run, nid, who, ranking)
             if res["ok"]:
                 return self._send_json(200, res)
-            return self._send_json(409, res)
+            # validation, never a race: unknown id, non-ballot, bad
+            # permutation — all client-addressable 400
+            return self._bad(res["error"])
         if path == "/tally":
             who = self._one(qs, "who", "")
             try:
@@ -898,11 +927,12 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             res = STORE.tally(run, nid, who)
             if res["ok"]:
                 return self._send_json(200, res)
-            return self._send_json(409, res)
+            # validation, never a race: unknown id, no options/ballots
+            return self._bad(res["error"])
         if path == "/retract":
             who = self._one(qs, "who", "")
             try:
@@ -910,7 +940,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             res = STORE.retract(run, nid, who)
             if res["ok"]:
                 return self._send_json(200, res)
@@ -921,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/enter":
             who = self._one(qs, "who", "")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             return self._send_json(
                 200, {"ok": True,
                       "checked_in": STORE.enter(run, who)})
@@ -950,7 +980,7 @@ class Handler(BaseHTTPRequestHandler):
             who = self._one(qs, "who", "")
             note = self._one(qs, "note", "")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(note):
                 return self._bad("note over 4KB")
             return self._send_json(200, STORE.leave(run, who, note))
@@ -959,7 +989,7 @@ class Handler(BaseHTTPRequestHandler):
             state = self._one(qs, "state", "")
             note = self._one(qs, "note", "")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(note):
                 return self._bad("note over 4KB")
             res = STORE.set_status(run, who, state, note)
@@ -978,7 +1008,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._bad("bad hop (want int)")
             if not frm or not NAME.match(frm):
-                return self._bad("bad from (your member id, e.g. from=m1)")
+                return self._bad("bad from (your member id, e.g. from=m1 — this route wants from=, not who=)")
             if not need or not NAME.match(need):
                 return self._bad("bad need (short tag, e.g. need=verify)")
             if mode not in ("fast", "auction"):
@@ -1050,7 +1080,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._body_ok(note):
                 return self._bad("note over 4KB")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             res = STORE.claim(run, nid, who, eta, note)
             if res["ok"]:
                 res["eta"] = eta  # echo the accepted estimate back
@@ -1066,7 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not winner or not NAME.match(winner):
                 return self._bad("bad winner (member id)")
             res = STORE.award(run, nid, who, winner)
@@ -1081,7 +1111,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
             if not body:
@@ -1104,7 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB")
             if not body:
@@ -1119,7 +1149,7 @@ class Handler(BaseHTTPRequestHandler):
             who = self._one(qs, "who", "")
             topic = self._topic(qs)
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if topic is None:
                 return self._bad("bad topic (want [A-Za-z0-9_-]{1,64})")
             return self._send_json(200, {"subscribed": STORE.subscribe(
@@ -1128,7 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
             who = self._one(qs, "who", "")
             topic = self._topic(qs)
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if topic is None:
                 return self._bad("bad topic (want [A-Za-z0-9_-]{1,64})")
             return self._send_json(200, {"subscribed": STORE.unsubscribe(
@@ -1141,7 +1171,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._bad("bad id (want int)")
             if not who or not NAME.match(who):
-                return self._bad("bad who (your member id)")
+                return self._bad("bad who (your member id — this route wants who=, not from=)")
             if not self._body_ok(body):
                 return self._bad("body over 4KB — split into smaller posts")
             if not body:
@@ -1164,7 +1194,7 @@ class Handler(BaseHTTPRequestHandler):
             scope = self._one(qs, "scope", "")
             confidence = self._one(qs, "confidence", "medium")
             if not frm or not NAME.match(frm):
-                return self._bad("bad from (your member id, e.g. from=m1)")
+                return self._bad("bad from (your member id, e.g. from=m1 — this route wants from=, not who=)")
             if not claim:
                 # tolerant reader: body= aliases claim= (unknown params
                 # are otherwise ignored, which used to drop prose silently)

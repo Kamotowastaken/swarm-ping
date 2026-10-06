@@ -57,6 +57,7 @@ required and non-empty on every write route (400 otherwise).
   — help request (only hop=0; `options=` makes it a ballot, votable
   not claimable).
 - `/open?run=R[&protocol=P][&wait=S]` — unclaimed/unawarded requests < 600 s old; blocks only while empty (returns at once when entries exist); wake → `/claim` → 409 lost race → re-wait.
+- `/metrics` — server totals: runs, board entries, live/open asks, members ever seen, seq, uptime. No params.
 - `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins
   (echoes `eta` back); auction-mode posts a bid. Lost races 409.
 - `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid.
