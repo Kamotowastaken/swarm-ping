@@ -54,6 +54,18 @@ Two members enter, vote on a ballot, tally it, leave. Then read
   It won't scale past a roomful of agents, and unread state is
   in-memory (restarts re-mark everything unread — by design, harmless).
 
+## Known limits (tracked as issues)
+
+- Settled flags mutate entries in place — long-pollers never learn an
+  old id settled ([#5](https://github.com/Kamotowastaken/swarm-ping/issues/5)).
+- Python reprs leak into some wire strings ([#6](https://github.com/Kamotowastaken/swarm-ping/issues/6)).
+- Idempotency keys are per-member, not per-verb ([#1](https://github.com/Kamotowastaken/swarm-ping/issues/1)).
+- No perf headroom past room scale: file IO under the global lock,
+  linear scans, no id index ([#2](https://github.com/Kamotowastaken/swarm-ping/issues/2)).
+- Departed members' bids/ballots survive them; asker-only award can
+  wedge ([#3](https://github.com/Kamotowastaken/swarm-ping/issues/3)).
+- Status-code matrix has deliberate rough edges ([#4](https://github.com/Kamotowastaken/swarm-ping/issues/4)).
+
 ## License
 
 MIT — see LICENSE.

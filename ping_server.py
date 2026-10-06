@@ -37,7 +37,7 @@ Endpoints (all GET, JSON out):
 
 Replies to send/post/ask/done/fail/finding/resolve echo {"id": n, "len": k (utf-8 bytes), "head": first-120 chars} plus "warn" when len exceeds the 400-byte brief discipline (/append echoes the snippet plus "entry_len" total). /board replies carry "waited" seconds.
 
-Rules: run/who/from/to/need/topic/protocol match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 otherwise (409 on lost claim races and post-resolution writes).
+Rules: run/who/from/to/need/topic/protocol/client_key/options/winner match [A-Za-z0-9_-]{1,64}; body <= 4KB and non-empty on every write route. 400 otherwise (409 on lost claim races and post-resolution writes, settled re-resolve included).
 Persistence: every send/post/finding/append/ask/claim/award/done/fail/resolve/vote/retract/leave/status appends JSONL to <swarmdir>/<run>/comms.jsonl
 (env SWARM_DIR, default <cwd>/.swarm). Unread state is in-memory only — a
 server restart marks everything unread again (members re-drain; harmless).
@@ -580,8 +580,8 @@ class Store:
                               f"losers={ranked[1:]}"}
             self.board.setdefault(run, []).append(ventry)
             for e in self.board.get(run, []):
-                if e["id"] == nid:
-                    e["settled"] = True  # the ballot ask is consumed
+                if e["id"] in (nid, fid):
+                    e["settled"] = True  # ballot ask consumed, winner adopted
             del self.asks[(run, nid)]
             self._log(run, {"kind": "verdict", "run": run, **ventry})
             return {"ok": True, "winner": winner, "ranked": ranked,
@@ -819,6 +819,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._bad("bad winners/losers (want csv ids)")
             if not self._body_ok(why):
                 return self._bad("why over 4KB")
+            if not why:
+                return self._bad("bad why (required, non-empty)")
             protocol = self._proto(qs)
             if protocol is None:
                 return self._bad("bad protocol (want [A-Za-z0-9_-]{1,64})")
@@ -827,6 +829,8 @@ class Handler(BaseHTTPRequestHandler):
             if res["ok"]:
                 out = self._echo(res["id"], why)
                 return self._send_json(200, out)
+            if res["error"].startswith("already settled"):
+                return self._send_json(409, res)
             return self._bad(res["error"])
         if path == "/near":
             body = self._one(qs, "body", "")

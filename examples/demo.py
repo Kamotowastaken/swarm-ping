@@ -94,7 +94,8 @@ f = get("/ask", run=RUN, **{"from": "m1", "need": "moot",
          "body": "withdrawn question"})
 show("fail", get("/fail", run=RUN, id=need(f, "id", "moot ask"), who="m1",
                  body="answered elsewhere"))
-show("transcript chars", len(get("/transcript", run=RUN)["transcript"]))
+show("transcript chars",
+     len(need(get("/transcript", run=RUN), "transcript", "transcript")))
 show("leave m1", get("/leave", run=RUN, who="m1", note="demo done"))
 show("leave m2", get("/leave", run=RUN, who="m2", note="demo done"))
 show("lobby", get("/lobby", run=RUN))

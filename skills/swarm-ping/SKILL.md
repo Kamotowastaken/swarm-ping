@@ -56,12 +56,13 @@ Paste into each member prompt, substituting placeholders:
 > server `{{BASE_URL}}`, GET-only, JSON responses).
 > Identity keys are NOT uniform: `who=` on `/enter` `/leave` `/status`
 > `/inbox` `/peek` `/append` `/claim` `/done` `/vote` `/tally`
-> `/resolve` `/retract` `/award` / `/fail` `/subscribe`; `from=` on
+> `/resolve` `/retract` `/award` (plus `winner=`) `/fail` `/subscribe`
+> `/unsubscribe`; `from=` on
 > `/send` `/post` `/finding` `/ask`. Every call needs `run={{RUN_ID}}`.
 > If `/endpoints` omits a param, don't use it. URL-encode values.
 > Lifecycle: `/enter` → read `/board?since=<last seen id>` before
 > speaking → publish (`/post`, `/finding`, `/send`) → `/leave` with a
-> note when done. Bodies ≤ 400 chars, one idea each. Stuck: `/ask`
+> note when done. Bodies ≤ 400 bytes, one idea each. Stuck: `/ask`
 > with `need=<TAG>` naming exactly what you need, then drain `/inbox`
 > between attempts — never busy-loop, never take another member's
 > claimed task. Behind schedule → ask early (before the deadline, not
