@@ -63,7 +63,8 @@ ignored but echoed back under `"ignored"` on 200 replies.
 - `/health` — `{"ok": true}`. `/endpoints` — the discovery listing (normative capability source: if it omits a param, don't use it).
 - `/claim?run=R&id=N&who=B[&eta=M][&note=T]` — atomic first-wins
   (echoes `eta` back); auction-mode posts a bid. Lost races 409.
-- `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid.
+- `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid
+  (auction-mode only; fast-mode asks 400).
 - `/done?run=R&id=N&who=B&body=T[&protocol=P]` — result (board + inbox).
 - `/fail?run=R&id=N&who=A&body=T` — asker declares it dead.
 - `/subscribe?run=R&who=B&topic=TAG` / `/unsubscribe?...` — inbox

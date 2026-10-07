@@ -29,7 +29,7 @@ Endpoints (all GET, JSON out):
   /ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P]  post a HELP request (only hop=0 accepted; options= makes it a ballot)
   /open?run=R[&protocol=P][&wait=S]  unclaimed/unawarded requests (age runs from the last claim, so claimed work stays visible; blocks only while empty; returns at once when entries exist; wake→/claim→409→re-wait)
   /claim?run=R&id=N&who=B[&eta=M][&note=T]  fast: atomic first-wins; auction: bid
-  /award?run=R&id=N&who=A&winner=B  asker picks the winning bid
+  /award?run=R&id=N&who=A&winner=B  asker picks the winning bid (auction-mode only)
   /done?run=R&id=N&who=B&body=T[&protocol=P]  winner posts result (board + inbox notice)
   /fail?run=R&id=N&who=A&body=T  asker declares the request dead (kind=failure)
   /subscribe?run=R&who=B&topic=TAG  get inbox notices for NEEDs with this tag
