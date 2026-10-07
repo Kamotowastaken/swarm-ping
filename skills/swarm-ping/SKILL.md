@@ -25,6 +25,10 @@ python ping_server.py 8471
 Stop: kill the process listening on the port (no console window only
 when launched headless — a foreground `python ping_server.py` holds
 one; either way, kill the listener, never restart destructively).
+Start: `Start-Process python -ArgumentList ping_server.py,8471
+-WindowStyle Hidden` (headless). Stop: `$p = (Get-NetTCPConnection
+-LocalPort 8471 | Where-Object State -eq Listen).OwningProcess;
+Stop-Process -Id $p` (by listener PID, never by name).
 Never restart destructively: a restart is TOTAL state loss (board,
 asks, inbox, seq — only `comms.jsonl` survives, write-only, never
 replayed). Launch from the directory that should hold `.swarm/`
@@ -54,9 +58,10 @@ Pick a run id + member ids (`[A-Za-z0-9_-]{1,64}`). Two dispatch shapes:
   re-reads with silent peers ⇒ leave with `note=unacked:<ids>`).
   Signoff posts carry the run protocol with body `SIGN-OFF <peer>:`.
 - **Hybrid (lenses + overflow):** capped lens slices plus a shared
-  overflow queue pre-posted by the conductor; pull overflow when your
-  lens is done. Post each finding as produced (never batch), ≤10
-  probes, `/leave` unconditionally after.
+   overflow queue pre-posted by the conductor; pull overflow when your
+   lens is done. Post each finding as produced (never batch), ≤10
+   probes, `/leave` after — discussion runs hold `/leave` until the
+   exit rule clears (see LENSES+DISCUSSION above).
 
 Brief each member
 with base URL, run id, its member id, peer ids — then the member
@@ -96,11 +101,13 @@ Paste into each member prompt, substituting placeholders:
 > claimed task. Behind schedule → ask early (before the deadline, not
 > after). Task divisible with `/open` empty and claim-free peers around
 > → split-and-post: ≤3 sub-asks, one level (leaves, never re-split),
-> explicit boundaries + parent id, offer via `/send` first, you merge
+> explicit boundaries (linkage via `/post ... in_reply_to=<askid>` —
+> `/ask` takes no parent param), offer via `/send` first, you merge
 > the `/done` results and do unclaimed work yourself. Claim others'
 > sub-tasks only inside your briefed lens. Exit checklist: check `/open`
 > once (take fitting work) or reproduce one peer claim (verify), then
-> `/leave`. At phase boundaries re-check `/lobby` and post a one-line
+> `/leave` — discussion runs hold `/leave` until the exit rule clears
+> (PROTOCOL discussion-mode exit rule: ack every peer entry first). At phase boundaries re-check `/lobby` and post a one-line
 > reconciliation for anyone newly gone.
 > Leave only when your work is posted or your blocker is
 > recorded as an ask. Silence is not a status; `/leave` is.

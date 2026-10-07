@@ -509,6 +509,8 @@ class Store:
             if a["awarded"] and a["awarded"] != who:
                 return {"ok": False, "awarded_to": a["awarded"]}
             if a["claimed_by"] == who and self._claim_live(a, now):
+                a["claimed_ts"] = now  # refresh: age runs from the
+                # last claim, and a repeat is a claim event too
                 return {"ok": True, "request": {
                     "id": nid, "from": a["from"], "need": a["need"],
                     "body": a["body"]}, "hint": "already yours"}
@@ -882,9 +884,9 @@ class Handler(BaseHTTPRequestHandler):
                 "/ask?run=R&from=A&need=TAG&body=T[&hop=0][&mode=fast|auction][&options=A,B,C][&protocol=P][&client_key=K]",
                 "/open?run=R[&protocol=P][&wait=S]",
                 "/claim?run=R&id=N&who=B[&eta=M][&note=T]",
-                "/award?run=R&id=N&who=A&winner=B",
+                "/award?run=R&id=N&who=A&winner=B (auction-mode only)",
                 "/done?run=R&id=N&who=B&body=T[&protocol=P]",
-                "/fail?run=R&id=N&who=A&body=T",
+                "/fail?run=R&id=N&who=A&body=T (409 when another member holds it live)",
                 "/subscribe?run=R&who=B&topic=TAG",
                 "/unsubscribe?run=R&who=B&topic=TAG",
                 "/transcript?run=R",

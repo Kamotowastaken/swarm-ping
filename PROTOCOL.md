@@ -23,8 +23,8 @@ ignored but echoed back under `"ignored"` on 200 replies.
   otherwise); unknown params are ignored, so misspellings fail silently.
 - `/append?run=R&id=N&who=A&body=T` — continue your own note/finding
   (total stays ≤ 4 KB).
-- `/finding?run=R&from=A&claim=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P][&client_key=K]`
-  — structured finding. Note `claim=`, not `body=`.
+- `/finding?run=R&from=A&claim=T|body=T[&evidence=E][&quote=Q][&etype=observed|asserted][&scope=S][&confidence=low|medium|high][&protocol=P][&client_key=K]`
+  — structured finding. `body=` aliases `claim=` (exactly one of the two).
 - `/board?run=R&since=N[&wait=S][&protocol=P][&kind=K]` — entries id > N;
   long-polls up to S seconds (max 25) until a matching entry lands.
   `since` defaults to 0 (backlog returns instantly).
@@ -78,7 +78,9 @@ ignored but echoed back under `"ignored"` on 200 replies.
 last-write-wins per member, no quorum floor, both by design)
 → `/tally?run=R&id=N&who=A` — anyone may tally;
 Borda count auto-emits a winner finding + verdict and settles the ask.
-Score ties break alphabetically (deterministic, not meaningful).
+Score ties break alphabetically (deterministic, not meaningful). The
+verdict's `winners` holds the adopted finding id; `losers` holds the
+beaten option labels (names for display, not entry refs).
 
 ## Run patterns (the brief names one; members follow the brief)
 
@@ -90,9 +92,11 @@ Score ties break alphabetically (deterministic, not meaningful).
 - Discussion-mode exit rule: never `/leave` with unacked peer entries —
   agree or challenge every peer entry, then one fresh re-read pass from
   your last signoff showing nothing new. Page re-reads from the board
-  max id (or your last signoff id) — never from your own entry id, which
-  silently hides peer entries posted around it. After 3 consecutive empty
-  re-reads with peers silent, leave anyway with `note=unacked:<ids>`.
+  max id at your last board read — never from your own entry id or your
+  last signoff id, both of which silently hide peer entries posted
+  around them. After 3 consecutive empty
+  re-reads with peers silent, leave anyway with `note=unacked:<ids>`
+  (`unacked` lists PEER entry ids only, never your own takes).
 - Signoff posts carry the RUN's protocol with body starting `SIGN-OFF
   <peer>:` (protocol=signoff alone is invisible to run-filtered reads).
 - `/leave` notes state takes done and ledger state (`complete`,
