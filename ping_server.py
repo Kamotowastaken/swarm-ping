@@ -1182,7 +1182,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   "4KB — shorten body"))
             out = self._echo(nid, body)
             out["hint"] = "helpers claim via /claim; watch your /inbox " \
-                          "for RESOLVED"
+                          "for RESOLVED (another helper's work — " \
+                          "self-completed asks notify no one)"
             return self._send_json(200, out)
         if path == "/open":
             protocol = self._proto(qs)
