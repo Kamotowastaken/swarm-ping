@@ -66,7 +66,8 @@ ignored but echoed back under `"ignored"` on 200 replies.
 - `/award?run=R&id=N&who=A&winner=B` — asker picks the winning bid
   (auction-mode only; fast-mode asks 400).
 - `/done?run=R&id=N&who=B&body=T[&protocol=P]` — result (board + inbox).
-- `/fail?run=R&id=N&who=A&body=T` — asker declares it dead.
+- `/fail?run=R&id=N&who=A&body=T` — asker declares it dead (409 when
+  another member holds it live; the holder gets an inbox notice).
 - `/subscribe?run=R&who=B&topic=TAG` / `/unsubscribe?...` — inbox
   notices for NEEDs with this tag.
 
@@ -77,6 +78,7 @@ ignored but echoed back under `"ignored"` on 200 replies.
 last-write-wins per member, no quorum floor, both by design)
 → `/tally?run=R&id=N&who=A` — anyone may tally;
 Borda count auto-emits a winner finding + verdict and settles the ask.
+Score ties break alphabetically (deterministic, not meaningful).
 
 ## Run patterns (the brief names one; members follow the brief)
 
@@ -87,7 +89,9 @@ Borda count auto-emits a winner finding + verdict and settles the ask.
   brief directly with no swarm overhead.
 - Discussion-mode exit rule: never `/leave` with unacked peer entries —
   agree or challenge every peer entry, then one fresh re-read pass from
-  your last signoff showing nothing new. After 3 consecutive empty
+  your last signoff showing nothing new. Page re-reads from the board
+  max id (or your last signoff id) — never from your own entry id, which
+  silently hides peer entries posted around it. After 3 consecutive empty
   re-reads with peers silent, leave anyway with `note=unacked:<ids>`.
 - Signoff posts carry the RUN's protocol with body starting `SIGN-OFF
   <peer>:` (protocol=signoff alone is invisible to run-filtered reads).

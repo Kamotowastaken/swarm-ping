@@ -31,7 +31,7 @@ Endpoints (all GET, JSON out):
   /claim?run=R&id=N&who=B[&eta=M][&note=T]  fast: atomic first-wins; auction: bid
   /award?run=R&id=N&who=A&winner=B  asker picks the winning bid (auction-mode only)
   /done?run=R&id=N&who=B&body=T[&protocol=P]  winner posts result (board + inbox notice)
-  /fail?run=R&id=N&who=A&body=T  asker declares the request dead (kind=failure)
+  /fail?run=R&id=N&who=A&body=T  asker declares the request dead (kind=failure; 409 when another member holds it live, holder notified)
   /subscribe?run=R&who=B&topic=TAG  get inbox notices for NEEDs with this tag
   /unsubscribe?run=R&who=B&topic=TAG
   /transcript?run=R                 markdown render of the run's board
@@ -214,10 +214,15 @@ class Store:
 
     def finding(self, run, frm, claim, evidence, quote, etype, scope,
                 confidence, protocol):
-        body = f"[{etype}/{confidence}] {claim} | " \
-               f"evidence {evidence}" + \
-               (f" scope {scope}" if scope else "") + \
-               (f' quote "{quote}"' if quote else "")
+        import re as _re
+        if _re.match(r"\[(observed|asserted)/", claim):
+            body = claim  # already self-graded prose (body= alias path):
+            # don't stack the param defaults on top of it
+        else:
+            body = f"[{etype}/{confidence}] {claim} | " \
+                   f"evidence {evidence}" + \
+                   (f" scope {scope}" if scope else "") + \
+                   (f' quote "{quote}"' if quote else "")
         if len(body.encode("utf-8")) > BODY_MAX:
             return None  # composed entry must respect the board invariant
         with self.lock:
@@ -503,6 +508,10 @@ class Store:
                         "hint": "awaiting /award by " + a["from"]}
             if a["awarded"] and a["awarded"] != who:
                 return {"ok": False, "awarded_to": a["awarded"]}
+            if a["claimed_by"] == who and self._claim_live(a, now):
+                return {"ok": True, "request": {
+                    "id": nid, "from": a["from"], "need": a["need"],
+                    "body": a["body"]}, "hint": "already yours"}
             if self._claim_live(a, now):
                 return {"ok": False, "claimed_by": a["claimed_by"]}
             stolen = a["claimed_by"] if a["claimed_by"] else None
@@ -561,6 +570,12 @@ class Store:
                 return {"ok": False,
                         "error": f"ballot holds {len(a['ballots'])} "
                                  "vote(s) — /tally it instead"}
+            now = time.time()
+            holder = a.get("claimed_by")
+            if holder and holder != who and self._claim_live(a, now):
+                return {"ok": False,
+                        "error": f"ask live — held by {holder}, "
+                                 "/done or steal it first"}
             composed = f"FAILED {nid} ({a['need']}): {body}"
             if len(composed.encode("utf-8")) > BODY_MAX:
                 return {"ok": False,
@@ -575,6 +590,13 @@ class Store:
                     e["settled"] = True  # dead asks refuse later writes
             del self.asks[(run, nid)]
             self._log(run, {"kind": "failure", "run": run, **entry})
+            if holder and holder != who:
+                self.seq += 1
+                msg = {"id": self.seq, "ts": time.time(), "from": who,
+                       "to": holder,
+                       "body": f"FAILED {nid}: asker killed it"[:BODY_MAX]}
+                self.inbox.setdefault((run, holder), []).append(msg)
+                self._log(run, {"kind": "msg", **msg})
             return {"ok": True, "id": entry["id"]}
 
     def create_once(self, run, frm, verb, key, thunk):
@@ -717,12 +739,12 @@ class Store:
             ventry = {"id": vid, "kind": "verdict", "ts": time.time(),
                       "from": who, "protocol": a.get("protocol", "general"),
                       "verdict": "adopt", "winners": [fid],
-                      "losers": [],
+                      "losers": ranked[1:],
                       "body": f"VERDICT adopt (ballot): {winner} wins, "
                               f"losers={','.join(ranked[1:])}"}
             self.board.setdefault(run, []).append(ventry)
             for e in self.board.get(run, []):
-                if e["id"] in (nid, fid):
+                if e["id"] in (nid, fid, vid):
                     e["settled"] = True  # ballot ask consumed, winner adopted
             del self.asks[(run, nid)]
             self._log(run, {"kind": "verdict", "run": run, **ventry})
@@ -1276,8 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
                 out = self._echo(res["id"], body)
                 out["failed"] = nid
                 return self._send_json(200, out)
-            # fail has no race branch: unknown id / wrong asker are
-            # client validation (400)
+            # fail has no race branch except the live-hold guard below:
+            # unknown id / wrong asker / voted ballot are client
+            # validation (400); a live holder elsewhere is a race (409)
+            if not res["ok"] and res["error"].startswith("ask live"):
+                return self._send_json(409, res)
             return self._bad(res["error"])
         if path == "/subscribe":
             who = self._one(qs, "who", "")
